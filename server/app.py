@@ -260,6 +260,96 @@ def get_prompt(prompt_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Modelos Pydantic
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Normalización de datos de flujo de caja
+# ---------------------------------------------------------------------------
+def _normalize_month(m: dict) -> dict:
+    """Asegura que un mes tenga todos los campos requeridos y totales correctos."""
+    income = m.get("income", {})
+    if not isinstance(income, dict):
+        income = {}
+    sales = _to_num(income.get("sales", 0))
+    other_income = _to_num(income.get("other_income", 0))
+    income_total = sales + other_income
+    income = {"sales": sales, "other_income": other_income, "total": income_total}
+
+    expenses = m.get("expenses", {})
+    if not isinstance(expenses, dict):
+        expenses = {}
+    variable_costs = _to_num(expenses.get("variable_costs", 0))
+    fixed_costs = _to_num(expenses.get("fixed_costs", 0))
+    variable_expenses = _to_num(expenses.get("variable_expenses", 0))
+    debt_payments = _to_num(expenses.get("debt_payments", 0))
+    taxes = _to_num(expenses.get("taxes", 0))
+    investments = _to_num(expenses.get("investments", 0))
+    expenses_total = variable_costs + fixed_costs + variable_expenses + debt_payments + taxes + investments
+    expenses = {
+        "variable_costs": variable_costs,
+        "fixed_costs": fixed_costs,
+        "variable_expenses": variable_expenses,
+        "debt_payments": debt_payments,
+        "taxes": taxes,
+        "investments": investments,
+        "total": expenses_total
+    }
+
+    net_flow = income_total - expenses_total
+
+    return {
+        "month": m.get("month", ""),
+        "label": m.get("label", ""),
+        "income": income,
+        "expenses": expenses,
+        "net_flow": net_flow,
+        "cumulative_balance": 0  # se recalcula después
+    }
+
+def _to_num(val) -> float:
+    """Convierte un valor a número, retorna 0 si no es posible."""
+    if isinstance(val, (int, float)):
+        return val
+    if isinstance(val, str):
+        try:
+            cleaned = val.replace("$", "").replace(".", "").replace(",", "").strip()
+            return float(cleaned)
+        except (ValueError, TypeError):
+            return 0
+    return 0
+
+def normalize_cashflow(data: dict) -> dict:
+    """Normaliza un flujo de caja completo: recalcula totales, saldos acumulados y summary."""
+    months = data.get("months", [])
+    if not isinstance(months, list):
+        months = []
+
+    normalized_months = []
+    cumulative = 0
+    total_income = 0
+    total_expenses = 0
+
+    for m in months:
+        nm = _normalize_month(m)
+        cumulative += nm["net_flow"]
+        nm["cumulative_balance"] = cumulative
+        total_income += nm["income"]["total"]
+        total_expenses += nm["expenses"]["total"]
+        normalized_months.append(nm)
+
+    net_cashflow = total_income - total_expenses
+    num_months = len(normalized_months) or 1
+
+    data["months"] = normalized_months
+    data["summary"] = {
+        "total_income": total_income,
+        "total_expenses": total_expenses,
+        "net_cashflow": net_cashflow,
+        "average_monthly_balance": round(net_cashflow / num_months)
+    }
+    data["period_months"] = len(normalized_months)
+    data["updated_at"] = datetime.now().isoformat()
+    return data
+
+
 class CompanyCreate(BaseModel):
     name: str
     sector: str = ""
@@ -270,6 +360,12 @@ class ChatMessage(BaseModel):
     company_id: str
     message: str
     session_id: Optional[str] = None
+
+class MonthData(BaseModel):
+    month: str = ""
+    label: str = ""
+    income: Optional[Dict[str, Any]] = None
+    expenses: Optional[Dict[str, Any]] = None
 
 class ScenarioRequest(BaseModel):
     company_id: str
@@ -477,12 +573,13 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
             _generation_status[task_id] = {"status": "error", "progress": 0, "error": "No se pudo generar el flujo de caja. Intenta proporcionar más información."}
             return
 
-        # Guardar flujo de caja
+        # Normalizar y guardar flujo de caja
+        cashflow_data = normalize_cashflow(cashflow_data)
         cashflow_data["id"] = str(uuid.uuid4())[:8]
         cashflow_data["company_id"] = company_id
         cashflow_data["created_at"] = datetime.now().isoformat()
-        cashflow_data["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "cashflow.json", cashflow_data)
+        logger.info(f"Flujo de caja normalizado: {len(cashflow_data.get('months', []))} meses, summary={cashflow_data.get('summary', {})}")
 
         # Actualizar estado de la empresa
         company["status"] = "complete"
@@ -505,7 +602,94 @@ async def get_cashflow(company_id: str):
     path = DATA_DIR / "companies" / company_id / "cashflow.json"
     if not path.exists():
         raise HTTPException(404, "Flujo de caja no encontrado. Genera uno primero.")
-    return load_json(path)
+    data = load_json(path)
+    # Siempre re-normalizar al leer para garantizar consistencia
+    data = normalize_cashflow(data)
+    return data
+
+# ---------------------------------------------------------------------------
+# Endpoints: Edición manual de meses del flujo de caja
+# ---------------------------------------------------------------------------
+@app.put("/api/companies/{company_id}/cashflow/months/{month_index}")
+async def update_month(company_id: str, month_index: int, month_data: MonthData):
+    """Actualiza un mes específico del flujo de caja por índice (0-based)."""
+    company_dir = DATA_DIR / "companies" / company_id
+    cashflow_path = company_dir / "cashflow.json"
+    if not cashflow_path.exists():
+        raise HTTPException(404, "No hay flujo de caja para editar.")
+
+    cashflow = load_json(cashflow_path)
+    months = cashflow.get("months", [])
+
+    if month_index < 0 or month_index >= len(months):
+        raise HTTPException(400, f"Índice de mes inválido: {month_index}. Rango válido: 0-{len(months)-1}")
+
+    # Actualizar campos proporcionados
+    existing = months[month_index]
+    if month_data.month:
+        existing["month"] = month_data.month
+    if month_data.label:
+        existing["label"] = month_data.label
+    if month_data.income is not None:
+        existing["income"] = month_data.income
+    if month_data.expenses is not None:
+        existing["expenses"] = month_data.expenses
+
+    months[month_index] = existing
+    cashflow["months"] = months
+
+    # Re-normalizar todo
+    cashflow = normalize_cashflow(cashflow)
+    save_json(cashflow_path, cashflow)
+
+    return cashflow
+
+@app.post("/api/companies/{company_id}/cashflow/months")
+async def add_month(company_id: str, month_data: MonthData):
+    """Agrega un nuevo mes al flujo de caja."""
+    company_dir = DATA_DIR / "companies" / company_id
+    cashflow_path = company_dir / "cashflow.json"
+    if not cashflow_path.exists():
+        raise HTTPException(404, "No hay flujo de caja. Genera uno primero.")
+
+    cashflow = load_json(cashflow_path)
+    months = cashflow.get("months", [])
+
+    new_month = {
+        "month": month_data.month or "",
+        "label": month_data.label or "",
+        "income": month_data.income or {"sales": 0, "other_income": 0, "total": 0},
+        "expenses": month_data.expenses or {"variable_costs": 0, "fixed_costs": 0, "variable_expenses": 0, "debt_payments": 0, "taxes": 0, "investments": 0, "total": 0}
+    }
+    months.append(new_month)
+    cashflow["months"] = months
+
+    cashflow = normalize_cashflow(cashflow)
+    save_json(cashflow_path, cashflow)
+
+    return cashflow
+
+@app.delete("/api/companies/{company_id}/cashflow/months/{month_index}")
+async def delete_month(company_id: str, month_index: int):
+    """Elimina un mes del flujo de caja por índice (0-based)."""
+    company_dir = DATA_DIR / "companies" / company_id
+    cashflow_path = company_dir / "cashflow.json"
+    if not cashflow_path.exists():
+        raise HTTPException(404, "No hay flujo de caja.")
+
+    cashflow = load_json(cashflow_path)
+    months = cashflow.get("months", [])
+
+    if month_index < 0 or month_index >= len(months):
+        raise HTTPException(400, f"Índice de mes inválido: {month_index}")
+
+    months.pop(month_index)
+    cashflow["months"] = months
+
+    cashflow = normalize_cashflow(cashflow)
+    save_json(cashflow_path, cashflow)
+
+    return cashflow
 
 # ---------------------------------------------------------------------------
 # Endpoints: Simulación de Escenarios

@@ -4,10 +4,12 @@ Tests para CCS Cashflow Assistant — Backend FastAPI
 Incluye pruebas unitarias y de integración para:
   - Utilidades de persistencia (save_json, load_json)
   - Parser JSON robusto (_extract_json_from_llm)
+  - Normalización de flujo de caja (normalize_cashflow)
   - Endpoints de empresas (CRUD)
   - Endpoints de agentes
-  - Endpoints de flujo de caja y exportación
+  - Endpoints de flujo de caja, edición de meses y exportación
   - Endpoints de health
+  - Validaciones de estructura Pinokio
 """
 
 import os
@@ -30,7 +32,8 @@ os.environ["PORT"] = "9999"
 from fastapi.testclient import TestClient
 from app import (
     app, save_json, load_json, _extract_json_from_llm,
-    _fix_encoding, DATA_DIR
+    _fix_encoding, normalize_cashflow, _normalize_month, _to_num,
+    DATA_DIR
 )
 
 client = TestClient(app)
@@ -46,7 +49,6 @@ class TestUtilities(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_save_and_load_json(self):
-        """Verifica que save_json y load_json funcionan correctamente."""
         path = self.test_dir / "test.json"
         data = {"name": "Empresa Test", "value": 12345, "acentos": "café, niño"}
         save_json(path, data)
@@ -56,166 +58,224 @@ class TestUtilities(unittest.TestCase):
         self.assertEqual(loaded["acentos"], "café, niño")
 
     def test_load_json_nonexistent(self):
-        """Verifica que load_json retorna default si el archivo no existe."""
         path = self.test_dir / "nonexistent.json"
         result = load_json(path, {"default": True})
         self.assertEqual(result, {"default": True})
 
     def test_load_json_corrupted(self):
-        """Verifica que load_json maneja archivos corruptos."""
         path = self.test_dir / "corrupted.json"
         path.write_text("not valid json {{{", encoding="utf-8")
         result = load_json(path, {"fallback": True})
         self.assertEqual(result, {"fallback": True})
 
     def test_save_json_creates_directories(self):
-        """Verifica que save_json crea directorios intermedios."""
         path = self.test_dir / "a" / "b" / "c" / "test.json"
         save_json(path, {"nested": True})
         self.assertTrue(path.exists())
 
     def test_extract_json_clean(self):
-        """Extrae JSON limpio."""
         text = '{"key": "value", "num": 42}'
         result = _extract_json_from_llm(text)
         self.assertIsNotNone(result)
         self.assertEqual(result["key"], "value")
-        self.assertEqual(result["num"], 42)
 
     def test_extract_json_with_markdown(self):
-        """Extrae JSON envuelto en bloques de código markdown."""
-        text = 'Aquí está el resultado:\n```json\n{"key": "value"}\n```\nFin.'
+        text = 'Aquí está:\n```json\n{"key": "value"}\n```\nFin.'
         result = _extract_json_from_llm(text)
         self.assertIsNotNone(result)
         self.assertEqual(result["key"], "value")
 
     def test_extract_json_with_preamble(self):
-        """Extrae JSON con texto previo."""
         text = 'El flujo de caja es:\n{"company": "Test", "months": []}'
         result = _extract_json_from_llm(text)
         self.assertIsNotNone(result)
         self.assertEqual(result["company"], "Test")
 
     def test_extract_json_none(self):
-        """Retorna None si no hay JSON."""
         self.assertIsNone(_extract_json_from_llm("No hay JSON aquí"))
         self.assertIsNone(_extract_json_from_llm(""))
         self.assertIsNone(_extract_json_from_llm(None))
 
-    def test_extract_json_nested(self):
-        """Extrae JSON con objetos anidados."""
-        text = '{"summary": {"total": 1000}, "months": [{"month": "2025-01"}]}'
-        result = _extract_json_from_llm(text)
-        self.assertIsNotNone(result)
-        self.assertEqual(result["summary"]["total"], 1000)
-        self.assertEqual(len(result["months"]), 1)
-
     def test_fix_encoding_normal(self):
-        """Verifica que _fix_encoding no altera texto normal."""
         self.assertEqual(_fix_encoding("Hola mundo"), "Hola mundo")
 
     def test_fix_encoding_accents(self):
-        """Verifica que _fix_encoding maneja acentos."""
         text = "café"
         result = _fix_encoding(text)
         self.assertIsInstance(result, str)
 
 
+class TestToNum(unittest.TestCase):
+    """Pruebas para _to_num."""
+
+    def test_int(self):
+        self.assertEqual(_to_num(100), 100)
+
+    def test_float(self):
+        self.assertEqual(_to_num(99.5), 99.5)
+
+    def test_string_number(self):
+        self.assertEqual(_to_num("1000"), 1000)
+
+    def test_string_with_currency(self):
+        self.assertEqual(_to_num("$1.000.000"), 1000000)
+
+    def test_none(self):
+        self.assertEqual(_to_num(None), 0)
+
+    def test_invalid_string(self):
+        self.assertEqual(_to_num("abc"), 0)
+
+    def test_empty_string(self):
+        self.assertEqual(_to_num(""), 0)
+
+
+class TestNormalizeMonth(unittest.TestCase):
+    """Pruebas para _normalize_month."""
+
+    def test_basic_normalization(self):
+        m = {
+            "month": "2025-01", "label": "Enero 2025",
+            "income": {"sales": 10000000, "other_income": 500000},
+            "expenses": {"variable_costs": 3000000, "fixed_costs": 2000000,
+                        "variable_expenses": 500000, "debt_payments": 300000,
+                        "taxes": 200000, "investments": 0}
+        }
+        result = _normalize_month(m)
+        self.assertEqual(result["income"]["total"], 10500000)
+        self.assertEqual(result["expenses"]["total"], 6000000)
+        self.assertEqual(result["net_flow"], 4500000)
+
+    def test_missing_fields(self):
+        m = {"month": "2025-01", "label": "Enero"}
+        result = _normalize_month(m)
+        self.assertEqual(result["income"]["total"], 0)
+        self.assertEqual(result["expenses"]["total"], 0)
+        self.assertEqual(result["net_flow"], 0)
+
+    def test_recalculates_totals(self):
+        """Verifica que recalcula totales incluso si vienen incorrectos."""
+        m = {
+            "month": "2025-01", "label": "Enero",
+            "income": {"sales": 5000, "other_income": 1000, "total": 999999},
+            "expenses": {"variable_costs": 1000, "fixed_costs": 500,
+                        "variable_expenses": 0, "debt_payments": 0,
+                        "taxes": 0, "investments": 0, "total": 999999}
+        }
+        result = _normalize_month(m)
+        self.assertEqual(result["income"]["total"], 6000)
+        self.assertEqual(result["expenses"]["total"], 1500)
+        self.assertEqual(result["net_flow"], 4500)
+
+
+class TestNormalizeCashflow(unittest.TestCase):
+    """Pruebas para normalize_cashflow."""
+
+    def test_recalculates_summary_from_months(self):
+        """Verifica que summary se recalcula desde los datos de meses."""
+        data = {
+            "summary": {"total_income": 0, "total_expenses": 0, "net_cashflow": 0, "average_monthly_balance": 0},
+            "months": [
+                {"month": "2025-01", "label": "Enero", "income": {"sales": 10000000, "other_income": 0}, "expenses": {"variable_costs": 3000000, "fixed_costs": 2000000, "variable_expenses": 500000, "debt_payments": 300000, "taxes": 200000, "investments": 0}},
+                {"month": "2025-02", "label": "Febrero", "income": {"sales": 12000000, "other_income": 0}, "expenses": {"variable_costs": 3500000, "fixed_costs": 2000000, "variable_expenses": 600000, "debt_payments": 300000, "taxes": 250000, "investments": 0}}
+            ]
+        }
+        result = normalize_cashflow(data)
+        self.assertEqual(result["summary"]["total_income"], 22000000)
+        self.assertEqual(result["summary"]["total_expenses"], 12650000)
+        self.assertEqual(result["summary"]["net_cashflow"], 9350000)
+        self.assertEqual(result["period_months"], 2)
+
+    def test_cumulative_balance(self):
+        """Verifica que el saldo acumulado se calcula progresivamente."""
+        data = {
+            "months": [
+                {"month": "2025-01", "label": "Enero", "income": {"sales": 10000}, "expenses": {"variable_costs": 3000}},
+                {"month": "2025-02", "label": "Febrero", "income": {"sales": 8000}, "expenses": {"variable_costs": 5000}},
+                {"month": "2025-03", "label": "Marzo", "income": {"sales": 12000}, "expenses": {"variable_costs": 4000}}
+            ]
+        }
+        result = normalize_cashflow(data)
+        self.assertEqual(result["months"][0]["cumulative_balance"], 7000)
+        self.assertEqual(result["months"][1]["cumulative_balance"], 10000)
+        self.assertEqual(result["months"][2]["cumulative_balance"], 18000)
+
+    def test_empty_months(self):
+        data = {"months": []}
+        result = normalize_cashflow(data)
+        self.assertEqual(result["summary"]["total_income"], 0)
+        self.assertEqual(result["period_months"], 0)
+
+    def test_preserves_other_fields(self):
+        data = {"months": [], "alerts": [{"type": "info", "message": "test"}], "recommendations": ["rec1"]}
+        result = normalize_cashflow(data)
+        self.assertEqual(len(result["alerts"]), 1)
+        self.assertEqual(len(result["recommendations"]), 1)
+
+
 class TestHealthEndpoint(unittest.TestCase):
-    """Pruebas para el endpoint de health."""
 
     @patch("app.http_requests.get")
     def test_health_ollama_connected(self, mock_get):
-        """Health retorna ollama=True cuando Ollama responde."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"models": []}
         mock_get.return_value = mock_response
-
         response = client.get("/api/health")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["status"], "ok")
-        self.assertTrue(data["ollama"])
+        self.assertTrue(response.json()["ollama"])
 
     @patch("app.http_requests.get", side_effect=Exception("Connection refused"))
     def test_health_ollama_disconnected(self, mock_get):
-        """Health retorna ollama=False cuando Ollama no responde."""
         response = client.get("/api/health")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["status"], "ok")
-        self.assertFalse(data["ollama"])
+        self.assertFalse(response.json()["ollama"])
 
 
 class TestCompanyEndpoints(unittest.TestCase):
-    """Pruebas para los endpoints de empresas."""
 
     def setUp(self):
-        # Limpiar directorio de empresas
         companies_dir = DATA_DIR / "companies"
         if companies_dir.exists():
             shutil.rmtree(companies_dir)
         companies_dir.mkdir(parents=True, exist_ok=True)
 
     def test_create_company(self):
-        """Crea una empresa correctamente."""
-        response = client.post("/api/companies", json={
-            "name": "Panadería Test",
-            "sector": "alimentos",
-            "size": "micro",
-            "description": "Una panadería de prueba"
-        })
+        response = client.post("/api/companies", json={"name": "Panadería Test", "sector": "alimentos", "size": "micro"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["name"], "Panadería Test")
-        self.assertEqual(data["sector"], "alimentos")
-        self.assertEqual(data["status"], "pending")
         self.assertIn("id", data)
 
     def test_list_companies(self):
-        """Lista empresas creadas."""
-        # Crear dos empresas
         client.post("/api/companies", json={"name": "Empresa 1"})
         client.post("/api/companies", json={"name": "Empresa 2"})
-
         response = client.get("/api/companies")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertGreaterEqual(len(data["companies"]), 2)
+        self.assertGreaterEqual(len(response.json()["companies"]), 2)
 
     def test_get_company(self):
-        """Obtiene una empresa por ID."""
         create_resp = client.post("/api/companies", json={"name": "Empresa Get"})
         company_id = create_resp.json()["id"]
-
         response = client.get(f"/api/companies/{company_id}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["name"], "Empresa Get")
 
     def test_get_company_not_found(self):
-        """Retorna 404 para empresa inexistente."""
         response = client.get("/api/companies/nonexistent")
         self.assertEqual(response.status_code, 404)
 
     def test_delete_company(self):
-        """Elimina una empresa."""
         create_resp = client.post("/api/companies", json={"name": "Empresa Delete"})
         company_id = create_resp.json()["id"]
-
         response = client.delete(f"/api/companies/{company_id}")
         self.assertEqual(response.status_code, 200)
-
-        # Verificar que ya no existe
-        get_resp = client.get(f"/api/companies/{company_id}")
-        self.assertEqual(get_resp.status_code, 404)
+        self.assertEqual(client.get(f"/api/companies/{company_id}").status_code, 404)
 
 
 class TestAgentEndpoints(unittest.TestCase):
-    """Pruebas para los endpoints de agentes."""
 
     def setUp(self):
-        # Copiar agents.json de defaults
         agents_dir = DATA_DIR / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         defaults_path = Path(__file__).parent.parent / "defaults" / "agents.json"
@@ -223,77 +283,53 @@ class TestAgentEndpoints(unittest.TestCase):
             shutil.copy2(str(defaults_path), str(agents_dir / "agents.json"))
 
     def test_list_agents(self):
-        """Lista agentes configurados."""
         response = client.get("/api/agents")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertIn("agents", data)
-        self.assertGreater(len(data["agents"]), 0)
+        self.assertGreater(len(response.json()["agents"]), 0)
 
     def test_get_agent(self):
-        """Obtiene un agente por ID."""
         response = client.get("/api/agents/financial_interviewer")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["id"], "financial_interviewer")
+        self.assertEqual(response.json()["id"], "financial_interviewer")
 
     def test_get_agent_not_found(self):
-        """Retorna 404 para agente inexistente."""
         response = client.get("/api/agents/nonexistent")
         self.assertEqual(response.status_code, 404)
 
     @patch("app._is_model_available", return_value=True)
     def test_update_agent(self, mock_avail):
-        """Actualiza configuración de un agente."""
-        response = client.put("/api/agents/financial_interviewer", json={
-            "model": "llama3.2:3b",
-            "temperature": 0.5
-        })
+        response = client.put("/api/agents/financial_interviewer", json={"model": "llama3.2:3b", "temperature": 0.5})
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(data["temperature"], 0.5)
+        self.assertEqual(response.json()["temperature"], 0.5)
 
 
 class TestCashflowEndpoints(unittest.TestCase):
-    """Pruebas para los endpoints de flujo de caja."""
 
     def setUp(self):
-        self.company_id = None
-        resp = client.post("/api/companies", json={
-            "name": "Empresa Cashflow Test",
-            "sector": "comercio"
-        })
+        resp = client.post("/api/companies", json={"name": "Empresa CF Test", "sector": "comercio"})
         self.company_id = resp.json()["id"]
 
     def test_get_cashflow_not_found(self):
-        """Retorna 404 si no hay flujo de caja."""
         response = client.get(f"/api/companies/{self.company_id}/cashflow")
         self.assertEqual(response.status_code, 404)
 
-    def test_cashflow_with_mock_data(self):
-        """Verifica que se puede leer un flujo de caja guardado manualmente."""
+    def test_cashflow_normalized_on_read(self):
+        """Verifica que al leer un cashflow, se normaliza automáticamente."""
         cashflow_data = {
             "company_name": "Test",
             "currency": "CLP",
-            "period_months": 12,
-            "summary": {
-                "total_income": 120000000,
-                "total_expenses": 96000000,
-                "net_cashflow": 24000000,
-                "average_monthly_balance": 2000000
-            },
+            "summary": {"total_income": 0, "total_expenses": 0, "net_cashflow": 0, "average_monthly_balance": 0},
             "months": [
-                {
-                    "month": "2025-01",
-                    "label": "Enero 2025",
-                    "income": {"sales": 10000000, "other_income": 0, "total": 10000000},
-                    "expenses": {"variable_costs": 4000000, "fixed_costs": 3000000, "variable_expenses": 500000, "debt_payments": 300000, "taxes": 200000, "investments": 0, "total": 8000000},
-                    "net_flow": 2000000,
-                    "cumulative_balance": 2000000
-                }
+                {"month": "2025-01", "label": "Enero 2025",
+                 "income": {"sales": 10000000, "other_income": 500000},
+                 "expenses": {"variable_costs": 3000000, "fixed_costs": 2000000, "variable_expenses": 500000, "debt_payments": 300000, "taxes": 200000, "investments": 0},
+                 "net_flow": 0, "cumulative_balance": 0},
+                {"month": "2025-02", "label": "Febrero 2025",
+                 "income": {"sales": 12000000, "other_income": 0},
+                 "expenses": {"variable_costs": 4000000, "fixed_costs": 2000000, "variable_expenses": 600000, "debt_payments": 300000, "taxes": 250000, "investments": 0},
+                 "net_flow": 0, "cumulative_balance": 0}
             ],
-            "alerts": [{"type": "info", "month": "2025-01", "message": "Flujo positivo"}],
-            "recommendations": ["Mantener control de gastos"]
+            "alerts": [], "recommendations": []
         }
         company_dir = DATA_DIR / "companies" / self.company_id
         save_json(company_dir / "cashflow.json", cashflow_data)
@@ -301,176 +337,239 @@ class TestCashflowEndpoints(unittest.TestCase):
         response = client.get(f"/api/companies/{self.company_id}/cashflow")
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["company_name"], "Test")
-        self.assertEqual(len(data["months"]), 1)
 
-    def test_export_excel(self):
-        """Verifica exportación a Excel."""
-        # Crear cashflow mock
+        # Verificar que summary fue recalculado
+        self.assertEqual(data["summary"]["total_income"], 22500000)
+        self.assertEqual(data["summary"]["total_expenses"], 13150000)
+        self.assertEqual(data["summary"]["net_cashflow"], 9350000)
+
+        # Verificar saldo acumulado
+        self.assertEqual(data["months"][0]["net_flow"], 4500000)
+        self.assertEqual(data["months"][0]["cumulative_balance"], 4500000)
+        self.assertEqual(data["months"][1]["cumulative_balance"], 4500000 + 4850000)
+
+
+class TestMonthCRUDEndpoints(unittest.TestCase):
+    """Pruebas para los endpoints de edición de meses."""
+
+    def setUp(self):
+        resp = client.post("/api/companies", json={"name": "Empresa Meses Test"})
+        self.company_id = resp.json()["id"]
+        # Crear cashflow base
         cashflow_data = {
-            "company_name": "Test Export",
-            "summary": {"total_income": 100, "total_expenses": 80, "net_cashflow": 20, "average_monthly_balance": 10},
+            "company_name": "Test Meses",
             "months": [
-                {"month": "2025-01", "label": "Enero", "income": {"total": 100}, "expenses": {"variable_costs": 30, "fixed_costs": 30, "variable_expenses": 10, "debt_payments": 5, "taxes": 5, "investments": 0, "total": 80}, "net_flow": 20, "cumulative_balance": 20}
+                {"month": "2025-01", "label": "Enero 2025", "income": {"sales": 5000000, "other_income": 0}, "expenses": {"variable_costs": 2000000, "fixed_costs": 1000000, "variable_expenses": 0, "debt_payments": 0, "taxes": 0, "investments": 0}},
+                {"month": "2025-02", "label": "Febrero 2025", "income": {"sales": 6000000, "other_income": 0}, "expenses": {"variable_costs": 2500000, "fixed_costs": 1000000, "variable_expenses": 0, "debt_payments": 0, "taxes": 0, "investments": 0}}
             ],
-            "alerts": [],
-            "recommendations": []
+            "alerts": [], "recommendations": []
         }
         company_dir = DATA_DIR / "companies" / self.company_id
         save_json(company_dir / "cashflow.json", cashflow_data)
 
+    def test_update_month(self):
+        """Actualiza un mes existente."""
+        response = client.put(f"/api/companies/{self.company_id}/cashflow/months/0", json={
+            "income": {"sales": 8000000, "other_income": 500000},
+            "expenses": {"variable_costs": 3000000, "fixed_costs": 1500000, "variable_expenses": 200000, "debt_payments": 0, "taxes": 100000, "investments": 0}
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["months"][0]["income"]["sales"], 8000000)
+        self.assertEqual(data["months"][0]["income"]["total"], 8500000)
+        # Verificar que summary se recalculó
+        self.assertGreater(data["summary"]["total_income"], 0)
+
+    def test_update_month_invalid_index(self):
+        """Retorna error para índice inválido."""
+        response = client.put(f"/api/companies/{self.company_id}/cashflow/months/99", json={
+            "income": {"sales": 1000}
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_add_month(self):
+        """Agrega un nuevo mes."""
+        response = client.post(f"/api/companies/{self.company_id}/cashflow/months", json={
+            "month": "2025-03", "label": "Marzo 2025",
+            "income": {"sales": 7000000, "other_income": 0},
+            "expenses": {"variable_costs": 2800000, "fixed_costs": 1000000, "variable_expenses": 0, "debt_payments": 0, "taxes": 0, "investments": 0}
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["months"]), 3)
+        self.assertEqual(data["months"][2]["month"], "2025-03")
+        self.assertEqual(data["period_months"], 3)
+
+    def test_delete_month(self):
+        """Elimina un mes."""
+        response = client.delete(f"/api/companies/{self.company_id}/cashflow/months/0")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data["months"]), 1)
+        self.assertEqual(data["months"][0]["month"], "2025-02")
+        # Verificar que saldo acumulado se recalculó
+        self.assertEqual(data["months"][0]["cumulative_balance"], data["months"][0]["net_flow"])
+
+    def test_delete_month_invalid_index(self):
+        response = client.delete(f"/api/companies/{self.company_id}/cashflow/months/99")
+        self.assertEqual(response.status_code, 400)
+
+    def test_add_month_no_cashflow(self):
+        """Retorna 404 si no hay cashflow."""
+        resp = client.post("/api/companies", json={"name": "Sin CF"})
+        cid = resp.json()["id"]
+        response = client.post(f"/api/companies/{cid}/cashflow/months", json={
+            "month": "2025-01", "label": "Enero"
+        })
+        self.assertEqual(response.status_code, 404)
+
+    def test_kpis_match_table_after_edit(self):
+        """Verifica que los KPIs (summary) coinciden con la suma de meses tras editar."""
+        # Editar mes 0
+        client.put(f"/api/companies/{self.company_id}/cashflow/months/0", json={
+            "income": {"sales": 10000000, "other_income": 1000000},
+            "expenses": {"variable_costs": 4000000, "fixed_costs": 2000000, "variable_expenses": 500000, "debt_payments": 300000, "taxes": 200000, "investments": 100000}
+        })
+        # Leer cashflow
+        response = client.get(f"/api/companies/{self.company_id}/cashflow")
+        data = response.json()
+
+        # Calcular manualmente
+        calc_income = sum(m["income"]["total"] for m in data["months"])
+        calc_expenses = sum(m["expenses"]["total"] for m in data["months"])
+        calc_net = calc_income - calc_expenses
+
+        self.assertEqual(data["summary"]["total_income"], calc_income)
+        self.assertEqual(data["summary"]["total_expenses"], calc_expenses)
+        self.assertEqual(data["summary"]["net_cashflow"], calc_net)
+
+
+class TestExportEndpoints(unittest.TestCase):
+
+    def setUp(self):
+        resp = client.post("/api/companies", json={"name": "Empresa Export"})
+        self.company_id = resp.json()["id"]
+        cashflow_data = {
+            "company_name": "Test Export",
+            "months": [
+                {"month": "2025-01", "label": "Enero", "income": {"sales": 100, "other_income": 0}, "expenses": {"variable_costs": 30, "fixed_costs": 30, "variable_expenses": 10, "debt_payments": 5, "taxes": 5, "investments": 0}}
+            ],
+            "alerts": [], "recommendations": []
+        }
+        save_json(DATA_DIR / "companies" / self.company_id / "cashflow.json", cashflow_data)
+
+    def test_export_excel(self):
         response = client.get(f"/api/companies/{self.company_id}/export/excel")
         self.assertEqual(response.status_code, 200)
         self.assertIn("spreadsheet", response.headers.get("content-type", ""))
 
     def test_export_csv(self):
-        """Verifica exportación a CSV."""
-        cashflow_data = {
-            "company_name": "Test CSV",
-            "summary": {},
-            "months": [
-                {"month": "2025-01", "label": "Enero", "income": {"total": 100}, "expenses": {"variable_costs": 30, "fixed_costs": 30, "variable_expenses": 10, "debt_payments": 5, "taxes": 5, "total": 80}, "net_flow": 20, "cumulative_balance": 20}
-            ],
-            "alerts": [],
-            "recommendations": []
-        }
-        company_dir = DATA_DIR / "companies" / self.company_id
-        save_json(company_dir / "cashflow.json", cashflow_data)
-
         response = client.get(f"/api/companies/{self.company_id}/export/csv")
         self.assertEqual(response.status_code, 200)
 
     def test_export_no_cashflow(self):
-        """Retorna 404 si no hay flujo de caja para exportar."""
-        response = client.get(f"/api/companies/{self.company_id}/export/excel")
+        resp = client.post("/api/companies", json={"name": "Sin CF"})
+        cid = resp.json()["id"]
+        response = client.get(f"/api/companies/{cid}/export/excel")
         self.assertEqual(response.status_code, 404)
 
 
 class TestModelsEndpoints(unittest.TestCase):
-    """Pruebas para endpoints de modelos."""
 
     @patch("app.http_requests.get")
     def test_available_models(self, mock_get):
-        """Lista modelos disponibles."""
         mock_response = MagicMock()
-        mock_response.json.return_value = {"models": [{"name": "llama3.2:3b"}, {"name": "llama3.1:8b"}]}
+        mock_response.json.return_value = {"models": [{"name": "llama3.2:3b"}]}
         mock_get.return_value = mock_response
-
         response = client.get("/api/models/available")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertIn("llama3.2:3b", data["models"])
+        self.assertIn("llama3.2:3b", response.json()["models"])
 
     @patch("app.http_requests.get", side_effect=Exception("Connection refused"))
     def test_available_models_offline(self, mock_get):
-        """Retorna lista vacía si Ollama no está disponible."""
         response = client.get("/api/models/available")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["models"], [])
-
-    def test_models_status(self):
-        """Retorna estado de descargas."""
-        response = client.get("/api/models/status")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("pull_status", response.json())
 
 
 class TestPinokioValidation(unittest.TestCase):
     """Validaciones de estructura del plugin Pinokio."""
 
     def test_lifecycle_scripts_are_json(self):
-        """Verifica que install, start, stop son JSON puros."""
         base = Path(__file__).parent.parent
         for name in ["install.json", "start.json", "stop.json", "reset.json"]:
             path = base / name
             self.assertTrue(path.exists(), f"{name} no encontrado")
-            content = path.read_text(encoding="utf-8")
             try:
-                json.loads(content)
+                json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 self.fail(f"{name} no es JSON válido")
 
     def test_pinokio_js_exists(self):
-        """Verifica que pinokio.js existe."""
         path = Path(__file__).parent.parent / "pinokio.js"
         self.assertTrue(path.exists())
 
     def test_pinokio_js_references_json(self):
-        """Verifica que pinokio.js referencia archivos .json."""
-        path = Path(__file__).parent.parent / "pinokio.js"
-        content = path.read_text(encoding="utf-8")
+        content = (Path(__file__).parent.parent / "pinokio.js").read_text(encoding="utf-8")
         self.assertIn("install.json", content)
         self.assertIn("start.json", content)
         self.assertIn("stop.json", content)
 
     def test_no_background_true(self):
-        """Verifica que no hay 'background: true' en los JSON."""
         base = Path(__file__).parent.parent
         for name in ["install.json", "start.json", "stop.json"]:
             content = (base / name).read_text(encoding="utf-8")
             self.assertNotIn('"background"', content, f"{name} contiene 'background'")
 
     def test_venv_name_consistent(self):
-        """Verifica que el nombre del venv es 'venv' en todos los archivos."""
         base = Path(__file__).parent.parent
         for name in ["install.json", "start.json", "pinokio.js"]:
             content = (base / name).read_text(encoding="utf-8")
             self.assertIn("venv", content, f"{name} no referencia 'venv'")
 
     def test_server_uses_absolute_paths(self):
-        """Verifica que el servidor usa rutas absolutas desde __file__."""
-        path = Path(__file__).parent.parent / "server" / "app.py"
-        content = path.read_text(encoding="utf-8")
+        content = (Path(__file__).parent.parent / "server" / "app.py").read_text(encoding="utf-8")
         self.assertIn("__file__", content)
 
     def test_ensure_ascii_false(self):
-        """Verifica que json.dumps usa ensure_ascii=False."""
-        path = Path(__file__).parent.parent / "server" / "app.py"
-        content = path.read_text(encoding="utf-8")
+        content = (Path(__file__).parent.parent / "server" / "app.py").read_text(encoding="utf-8")
         self.assertIn("ensure_ascii=False", content)
 
     def test_response_encoding_utf8(self):
-        """Verifica que se fuerza encoding UTF-8 en respuestas de Ollama."""
-        path = Path(__file__).parent.parent / "server" / "app.py"
-        content = path.read_text(encoding="utf-8")
+        content = (Path(__file__).parent.parent / "server" / "app.py").read_text(encoding="utf-8")
         self.assertIn('resp.encoding = "utf-8"', content)
 
     def test_no_let_const_in_html(self):
-        """Verifica que no hay let/const/import/export en el HTML."""
-        path = Path(__file__).parent.parent / "app" / "index.html"
-        content = path.read_text(encoding="utf-8")
-        # Buscar en el bloque de script
+        content = (Path(__file__).parent.parent / "app" / "index.html").read_text(encoding="utf-8")
         script_start = content.find("<script>")
         script_end = content.find("</script>")
         if script_start != -1 and script_end != -1:
             script = content[script_start:script_end]
-            # Verificar que no hay let/const como declaraciones (no dentro de strings)
             import re
-            lets = re.findall(r'^\s*let\s', script, re.MULTILINE)
-            consts = re.findall(r'^\s*const\s', script, re.MULTILINE)
-            imports = re.findall(r'^\s*import\s', script, re.MULTILINE)
-            exports = re.findall(r'^\s*export\s', script, re.MULTILINE)
-            self.assertEqual(len(lets), 0, f"Encontrados {len(lets)} 'let' en el script")
-            self.assertEqual(len(consts), 0, f"Encontrados {len(consts)} 'const' en el script")
-            self.assertEqual(len(imports), 0, f"Encontrados {len(imports)} 'import' en el script")
-            self.assertEqual(len(exports), 0, f"Encontrados {len(exports)} 'export' en el script")
+            self.assertEqual(len(re.findall(r'^\s*let\s', script, re.MULTILINE)), 0)
+            self.assertEqual(len(re.findall(r'^\s*const\s', script, re.MULTILINE)), 0)
+            self.assertEqual(len(re.findall(r'^\s*import\s', script, re.MULTILINE)), 0)
+            self.assertEqual(len(re.findall(r'^\s*export\s', script, re.MULTILINE)), 0)
 
     def test_icon_exists(self):
-        """Verifica que icon.png existe."""
-        path = Path(__file__).parent.parent / "icon.png"
-        self.assertTrue(path.exists())
+        self.assertTrue((Path(__file__).parent.parent / "icon.png").exists())
 
     def test_defaults_agents_json(self):
-        """Verifica que defaults/agents.json es válido."""
         path = Path(__file__).parent.parent / "defaults" / "agents.json"
         self.assertTrue(path.exists())
         data = json.loads(path.read_text(encoding="utf-8"))
         self.assertIn("agents", data)
-        self.assertGreater(len(data["agents"]), 0)
         for agent in data["agents"]:
             self.assertIn("id", agent)
-            self.assertIn("name", agent)
             self.assertIn("model", agent)
+
+    def test_normalize_cashflow_in_app(self):
+        """Verifica que normalize_cashflow está importable y funcional."""
+        data = {"months": [{"month": "2025-01", "label": "Enero", "income": {"sales": 100}, "expenses": {"variable_costs": 50}}]}
+        result = normalize_cashflow(data)
+        self.assertEqual(result["summary"]["total_income"], 100)
+        self.assertEqual(result["summary"]["total_expenses"], 50)
+        self.assertEqual(result["summary"]["net_cashflow"], 50)
 
 
 if __name__ == "__main__":

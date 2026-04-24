@@ -333,6 +333,40 @@
 
     /* ===== CHART CONTAINER ===== */
     .chart-container { position: relative; height: 300px; width: 100%; }
+
+    /* ===== EDITABLE TABLE ===== */
+    .data-table td.editable { cursor: pointer; position: relative; }
+    .data-table td.editable:hover { background: rgba(13,86,202,0.06); }
+    .data-table .edit-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; border-radius: 6px; background: transparent;
+      color: var(--text-muted); font-size: 12px; cursor: pointer; border: none;
+      transition: all 0.15s;
+    }
+    .data-table .edit-btn:hover { background: var(--ccs-azul-oscuro); color: #fff; }
+    .data-table .delete-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; border-radius: 6px; background: transparent;
+      color: var(--text-muted); font-size: 12px; cursor: pointer; border: none;
+      transition: all 0.15s;
+    }
+    .data-table .delete-btn:hover { background: var(--danger); color: #fff; }
+    .actions-cell { display: flex; gap: 4px; align-items: center; }
+    .add-month-bar {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 12px; border-top: 1px dashed var(--border); margin-top: 4px;
+    }
+
+    /* ===== EDIT MONTH MODAL ===== */
+    .edit-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .edit-form-section {
+      margin-bottom: 16px; padding: 12px; background: var(--bg-base);
+      border-radius: var(--radius); border: 1px solid var(--border);
+    }
+    .edit-form-section-title {
+      font-size: 12px; font-weight: 700; color: var(--ccs-azul-oscuro);
+      text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px;
+    }
   </style>
 </head>
 <body>
@@ -648,6 +682,51 @@
           <button class="btn btn-primary" onclick="createCompany()">
             <i class="fa-solid fa-plus"></i> Crear Empresa
           </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MODAL: Editar Mes ===== -->
+  <div class="modal-overlay" id="editMonthModal">
+    <div class="modal" style="max-width:640px">
+      <div class="modal-header">
+        <div class="modal-title" id="editMonthTitle"><i class="fa-solid fa-pen-to-square"></i> Editar Mes</div>
+        <button class="modal-close" onclick="closeModal('editMonthModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="editMonthIndex" value="-1" />
+        <div class="form-row">
+          <div class="form-group">
+            <label>Mes (YYYY-MM)</label>
+            <input type="text" id="editMonthCode" placeholder="2025-01" />
+          </div>
+          <div class="form-group">
+            <label>Etiqueta</label>
+            <input type="text" id="editMonthLabel" placeholder="Enero 2025" />
+          </div>
+        </div>
+        <div class="edit-form-section">
+          <div class="edit-form-section-title"><i class="fa-solid fa-arrow-trend-up"></i> Ingresos</div>
+          <div class="edit-form-grid">
+            <div class="form-group"><label>Ventas</label><input type="number" id="editSales" value="0" /></div>
+            <div class="form-group"><label>Otros Ingresos</label><input type="number" id="editOtherIncome" value="0" /></div>
+          </div>
+        </div>
+        <div class="edit-form-section">
+          <div class="edit-form-section-title"><i class="fa-solid fa-arrow-trend-down"></i> Egresos</div>
+          <div class="edit-form-grid">
+            <div class="form-group"><label>Costos Variables</label><input type="number" id="editVarCosts" value="0" /></div>
+            <div class="form-group"><label>Costos Fijos</label><input type="number" id="editFixedCosts" value="0" /></div>
+            <div class="form-group"><label>Gastos Variables</label><input type="number" id="editVarExpenses" value="0" /></div>
+            <div class="form-group"><label>Pago de Deudas</label><input type="number" id="editDebtPayments" value="0" /></div>
+            <div class="form-group"><label>Impuestos</label><input type="number" id="editTaxes" value="0" /></div>
+            <div class="form-group"><label>Inversiones</label><input type="number" id="editInvestments" value="0" /></div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" onclick="closeModal('editMonthModal')">Cancelar</button>
+          <button class="btn btn-primary" onclick="saveMonthEdit()"><i class="fa-solid fa-floppy-disk"></i> Guardar</button>
         </div>
       </div>
     </div>
@@ -1023,19 +1102,23 @@
     }
 
     function renderDashboard(data) {
-      var summary = data.summary || {};
       var months = data.months || [];
       var alerts = data.alerts || [];
       var recommendations = data.recommendations || [];
 
-      var totalIncome = summary.total_income || 0;
-      var totalExpenses = summary.total_expenses || 0;
-      var netCashflow = summary.net_cashflow || 0;
-      var avgBalance = summary.average_monthly_balance || 0;
+      // SIEMPRE recalcular KPIs desde los datos de meses (no confiar en summary)
+      var totalIncome = 0;
+      var totalExpenses = 0;
+      for (var k = 0; k < months.length; k++) {
+        totalIncome += ((months[k].income || {}).total || 0);
+        totalExpenses += ((months[k].expenses || {}).total || 0);
+      }
+      var netCashflow = totalIncome - totalExpenses;
+      var avgBalance = months.length > 0 ? Math.round(netCashflow / months.length) : 0;
 
       var html = '';
 
-      // Stat cards
+      // Stat cards — calculados desde los meses reales
       html += '<div class="grid-4" style="margin-bottom:16px">';
       html += '<div class="stat-card green"><div class="stat-label">Ingresos Totales</div><div class="stat-value">$' + formatNumber(totalIncome) + '</div><div class="stat-sub">Proyecci&oacute;n ' + months.length + ' meses</div></div>';
       html += '<div class="stat-card danger"><div class="stat-label">Gastos Totales</div><div class="stat-value">$' + formatNumber(totalExpenses) + '</div><div class="stat-sub">Proyecci&oacute;n ' + months.length + ' meses</div></div>';
@@ -1049,26 +1132,42 @@
       html += '<div class="card"><div class="card-title" style="margin-bottom:12px"><i class="fa-solid fa-chart-pie"></i> Distribuci&oacute;n de Gastos</div><div class="chart-container"><canvas id="expensePieChart"></canvas></div></div>';
       html += '</div>';
 
-      // Table
-      html += '<div class="card"><div class="card-title" style="margin-bottom:12px"><i class="fa-solid fa-table"></i> Detalle Mensual</div>';
+      // Editable Table
+      html += '<div class="card"><div class="card-header"><div class="card-title"><i class="fa-solid fa-table"></i> Detalle Mensual</div><button class="btn btn-sm btn-success" onclick="openAddMonthModal()"><i class="fa-solid fa-plus"></i> Agregar Mes</button></div>';
       html += '<div style="overflow-x:auto"><table class="data-table"><thead><tr>';
-      html += '<th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Flujo Neto</th><th>Saldo Acumulado</th>';
+      html += '<th>Mes</th><th>Ventas</th><th>Otros Ing.</th><th>Ingresos</th><th>C.Variables</th><th>C.Fijos</th><th>G.Variables</th><th>Deudas</th><th>Impuestos</th><th>Inversiones</th><th>Gastos</th><th>Flujo Neto</th><th>Saldo Acum.</th><th>Acciones</th>';
       html += '</tr></thead><tbody>';
       for (var i = 0; i < months.length; i++) {
         var m = months[i];
-        var income = (m.income || {}).total || 0;
-        var expenses = (m.expenses || {}).total || 0;
+        var inc = m.income || {};
+        var exp = m.expenses || {};
+        var incTotal = inc.total || 0;
+        var expTotal = exp.total || 0;
         var net = m.net_flow || 0;
         var balance = m.cumulative_balance || 0;
         html += '<tr>';
         html += '<td><strong>' + escapeHtml(m.label || m.month || '') + '</strong></td>';
-        html += '<td class="positive">$' + formatNumber(income) + '</td>';
-        html += '<td class="negative">$' + formatNumber(expenses) + '</td>';
-        html += '<td class="' + (net >= 0 ? 'positive' : 'negative') + '">$' + formatNumber(net) + '</td>';
-        html += '<td class="' + (balance >= 0 ? 'positive' : 'negative') + '">$' + formatNumber(balance) + '</td>';
+        html += '<td class="positive">$' + formatNumber(inc.sales || 0) + '</td>';
+        html += '<td class="positive">$' + formatNumber(inc.other_income || 0) + '</td>';
+        html += '<td class="positive" style="font-weight:700">$' + formatNumber(incTotal) + '</td>';
+        html += '<td class="negative">$' + formatNumber(exp.variable_costs || 0) + '</td>';
+        html += '<td class="negative">$' + formatNumber(exp.fixed_costs || 0) + '</td>';
+        html += '<td class="negative">$' + formatNumber(exp.variable_expenses || 0) + '</td>';
+        html += '<td class="negative">$' + formatNumber(exp.debt_payments || 0) + '</td>';
+        html += '<td class="negative">$' + formatNumber(exp.taxes || 0) + '</td>';
+        html += '<td class="negative">$' + formatNumber(exp.investments || 0) + '</td>';
+        html += '<td class="negative" style="font-weight:700">$' + formatNumber(expTotal) + '</td>';
+        html += '<td class="' + (net >= 0 ? 'positive' : 'negative') + '" style="font-weight:700">$' + formatNumber(net) + '</td>';
+        html += '<td class="' + (balance >= 0 ? 'positive' : 'negative') + '" style="font-weight:700">$' + formatNumber(balance) + '</td>';
+        html += '<td><div class="actions-cell">';
+        html += '<button class="edit-btn" title="Editar" onclick="openEditMonthModal(' + i + ')"><i class="fa-solid fa-pen"></i></button>';
+        html += '<button class="delete-btn" title="Eliminar" onclick="deleteMonthRow(' + i + ')"><i class="fa-solid fa-trash"></i></button>';
+        html += '</div></td>';
         html += '</tr>';
       }
-      html += '</tbody></table></div></div>';
+      html += '</tbody></table></div>';
+      html += '<div class="add-month-bar"><button class="btn btn-sm btn-secondary" onclick="openAddMonthModal()"><i class="fa-solid fa-plus"></i> Agregar nuevo mes</button></div>';
+      html += '</div>';
 
       // Alerts
       if (alerts.length > 0) {
@@ -1097,6 +1196,28 @@
       setTimeout(function() { renderDashboardCharts(data); }, 100);
     }
 
+    /* ===== CÁLCULO DE TENDENCIA LINEAL ===== */
+    function calcLinearTrend(values) {
+      var n = values.length;
+      if (n < 2) return values.slice();
+      var sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+      for (var i = 0; i < n; i++) {
+        sumX += i;
+        sumY += values[i];
+        sumXY += i * values[i];
+        sumX2 += i * i;
+      }
+      var denom = (n * sumX2 - sumX * sumX);
+      if (denom === 0) return values.slice();
+      var slope = (n * sumXY - sumX * sumY) / denom;
+      var intercept = (sumY - slope * sumX) / n;
+      var trend = [];
+      for (var i = 0; i < n; i++) {
+        trend.push(Math.round(intercept + slope * i));
+      }
+      return trend;
+    }
+
     function renderDashboardCharts(data) {
       var months = data.months || [];
       var labels = months.map(function(m) { return m.label || m.month || ''; });
@@ -1105,11 +1226,14 @@
       var netFlows = months.map(function(m) { return m.net_flow || 0; });
       var balances = months.map(function(m) { return m.cumulative_balance || 0; });
 
+      // Calcular línea de tendencia del saldo acumulado
+      var trendBalances = calcLinearTrend(balances);
+
       // Destroy existing charts
       if (dashboardCharts.line) dashboardCharts.line.destroy();
       if (dashboardCharts.pie) dashboardCharts.pie.destroy();
 
-      // Line chart
+      // Line chart con tendencia
       var lineCtx = document.getElementById('cashflowLineChart');
       if (lineCtx) {
         dashboardCharts.line = new Chart(lineCtx, {
@@ -1117,12 +1241,21 @@
           data: {
             labels: labels,
             datasets: [
-              { label: 'Ingresos', data: incomes, borderColor: '#3DAE2B', backgroundColor: 'rgba(61,174,43,0.1)', fill: true, tension: 0.3 },
-              { label: 'Gastos', data: expenses, borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,0.1)', fill: true, tension: 0.3 },
-              { label: 'Saldo Acumulado', data: balances, borderColor: '#0D3DA6', backgroundColor: 'rgba(13,61,166,0.1)', fill: false, tension: 0.3, borderDash: [5, 5] }
+              { label: 'Ingresos', data: incomes, borderColor: '#3DAE2B', backgroundColor: 'rgba(61,174,43,0.1)', fill: true, tension: 0.3, borderWidth: 2 },
+              { label: 'Gastos', data: expenses, borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,0.1)', fill: true, tension: 0.3, borderWidth: 2 },
+              { label: 'Saldo Acumulado', data: balances, borderColor: '#0D3DA6', backgroundColor: 'rgba(13,61,166,0.08)', fill: true, tension: 0.3, borderWidth: 2.5 },
+              { label: 'Tendencia', data: trendBalances, borderColor: '#f59e0b', backgroundColor: 'transparent', fill: false, tension: 0, borderWidth: 2, borderDash: [8, 4], pointRadius: 0 }
             ]
           },
-          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } }, scales: { y: { beginAtZero: true } } }
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+              y: {
+                ticks: { callback: function(v) { return '$' + (v >= 1000000 ? (v/1000000).toFixed(1) + 'M' : v >= 1000 ? (v/1000).toFixed(0) + 'K' : v); } }
+              }
+            }
+          }
         });
       }
 
@@ -1152,6 +1285,130 @@
           options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
         });
       }
+    }
+
+    /* ===== EDICIÓN DE MESES ===== */
+    function openEditMonthModal(index) {
+      if (!currentCashflow || !currentCashflow.months || index >= currentCashflow.months.length) return;
+      var m = currentCashflow.months[index];
+      var inc = m.income || {};
+      var exp = m.expenses || {};
+      document.getElementById('editMonthIndex').value = index;
+      document.getElementById('editMonthCode').value = m.month || '';
+      document.getElementById('editMonthLabel').value = m.label || '';
+      document.getElementById('editSales').value = inc.sales || 0;
+      document.getElementById('editOtherIncome').value = inc.other_income || 0;
+      document.getElementById('editVarCosts').value = exp.variable_costs || 0;
+      document.getElementById('editFixedCosts').value = exp.fixed_costs || 0;
+      document.getElementById('editVarExpenses').value = exp.variable_expenses || 0;
+      document.getElementById('editDebtPayments').value = exp.debt_payments || 0;
+      document.getElementById('editTaxes').value = exp.taxes || 0;
+      document.getElementById('editInvestments').value = exp.investments || 0;
+      document.getElementById('editMonthTitle').innerHTML = '<i class="fa-solid fa-pen-to-square"></i> Editar: ' + escapeHtml(m.label || m.month || 'Mes ' + (index + 1));
+      openModal('editMonthModal');
+    }
+
+    function openAddMonthModal() {
+      // Precargar con el siguiente mes lógico
+      var nextMonth = '';
+      var nextLabel = '';
+      if (currentCashflow && currentCashflow.months && currentCashflow.months.length > 0) {
+        var lastMonth = currentCashflow.months[currentCashflow.months.length - 1].month || '';
+        if (lastMonth.match(/^\d{4}-\d{2}$/)) {
+          var parts = lastMonth.split('-');
+          var y = parseInt(parts[0]);
+          var mo = parseInt(parts[1]) + 1;
+          if (mo > 12) { mo = 1; y++; }
+          nextMonth = y + '-' + (mo < 10 ? '0' + mo : mo);
+          var monthNames = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+          nextLabel = monthNames[mo - 1] + ' ' + y;
+        }
+      }
+      document.getElementById('editMonthIndex').value = -1;
+      document.getElementById('editMonthCode').value = nextMonth;
+      document.getElementById('editMonthLabel').value = nextLabel;
+      document.getElementById('editSales').value = 0;
+      document.getElementById('editOtherIncome').value = 0;
+      document.getElementById('editVarCosts').value = 0;
+      document.getElementById('editFixedCosts').value = 0;
+      document.getElementById('editVarExpenses').value = 0;
+      document.getElementById('editDebtPayments').value = 0;
+      document.getElementById('editTaxes').value = 0;
+      document.getElementById('editInvestments').value = 0;
+      document.getElementById('editMonthTitle').innerHTML = '<i class="fa-solid fa-plus"></i> Agregar Nuevo Mes';
+      openModal('editMonthModal');
+    }
+
+    function saveMonthEdit() {
+      if (!currentCompanyId) return;
+      var index = parseInt(document.getElementById('editMonthIndex').value);
+      var monthData = {
+        month: document.getElementById('editMonthCode').value,
+        label: document.getElementById('editMonthLabel').value,
+        income: {
+          sales: parseFloat(document.getElementById('editSales').value) || 0,
+          other_income: parseFloat(document.getElementById('editOtherIncome').value) || 0
+        },
+        expenses: {
+          variable_costs: parseFloat(document.getElementById('editVarCosts').value) || 0,
+          fixed_costs: parseFloat(document.getElementById('editFixedCosts').value) || 0,
+          variable_expenses: parseFloat(document.getElementById('editVarExpenses').value) || 0,
+          debt_payments: parseFloat(document.getElementById('editDebtPayments').value) || 0,
+          taxes: parseFloat(document.getElementById('editTaxes').value) || 0,
+          investments: parseFloat(document.getElementById('editInvestments').value) || 0
+        }
+      };
+
+      var url, method;
+      if (index >= 0) {
+        // Editar mes existente
+        url = '/api/companies/' + currentCompanyId + '/cashflow/months/' + index;
+        method = 'PUT';
+      } else {
+        // Agregar nuevo mes
+        url = '/api/companies/' + currentCompanyId + '/cashflow/months';
+        method = 'POST';
+      }
+
+      fetch(url, {
+        method: method,
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(monthData)
+      })
+      .then(function(r) {
+        if (!r.ok) throw new Error('Error al guardar');
+        return r.json();
+      })
+      .then(function(data) {
+        currentCashflow = data;
+        closeModal('editMonthModal');
+        renderDashboard(data);
+        showNotification(index >= 0 ? 'Mes actualizado correctamente' : 'Nuevo mes agregado', 'success');
+      })
+      .catch(function(e) {
+        showNotification('Error: ' + e.message, 'error');
+      });
+    }
+
+    function deleteMonthRow(index) {
+      if (!currentCompanyId) return;
+      if (!confirm('¿Eliminar este mes del flujo de caja?')) return;
+
+      fetch('/api/companies/' + currentCompanyId + '/cashflow/months/' + index, {
+        method: 'DELETE'
+      })
+      .then(function(r) {
+        if (!r.ok) throw new Error('Error al eliminar');
+        return r.json();
+      })
+      .then(function(data) {
+        currentCashflow = data;
+        renderDashboard(data);
+        showNotification('Mes eliminado', 'info');
+      })
+      .catch(function(e) {
+        showNotification('Error: ' + e.message, 'error');
+      });
     }
 
     /* ===== SIMULADOR ===== */
