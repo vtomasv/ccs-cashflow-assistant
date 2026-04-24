@@ -1,0 +1,28 @@
+{
+  "run": [
+    {
+      "method": "log",
+      "params": {
+        "html": "<p>&#x1F5D1;&#xFE0F; Desinstalando CCS Cashflow Assistant...</p>"
+      }
+    },
+    {
+      "method": "fs.rm",
+      "params": {
+        "path": "venv"
+      }
+    },
+    {
+      "method": "log",
+      "params": {
+        "html": "<p>&#x2705; Desinstalado. Los datos del usuario se conservan en la carpeta 'data'.</p>"
+      }
+    },
+    {
+      "method": "notify",
+      "params": {
+        "html": "CCS Cashflow Assistant desinstalado. Los datos del usuario se conservan en la carpeta 'data'."
+      }
+    }
+  ]
+}

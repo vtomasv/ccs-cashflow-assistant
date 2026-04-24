@@ -1,0 +1,16 @@
+{
+  "run": [
+    {
+      "method": "script.stop",
+      "params": {
+        "uri": "start.json"
+      }
+    },
+    {
+      "method": "log",
+      "params": {
+        "html": "<p>&#x23F9;&#xFE0F; CCS Cashflow Assistant detenido.</p>"
+      }
+    }
+  ]
+}
