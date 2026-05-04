@@ -2,30 +2,46 @@
   "daemon": true,
   "run": [
     {
-      "when": "{{platform !== 'win32'}}",
+      "method": "log",
+      "params": {
+        "html": "<p>&#x25B6;&#xFE0F; Iniciando CCS Cashflow Assistant...</p>"
+      }
+    },
+
+    {
+      "when": "{{platform === 'darwin'}}",
       "method": "shell.run",
       "params": {
-        "message": "ollama serve > /dev/null 2>&1 &"
+        "message": "ollama serve > /dev/null 2>&1 & sleep 3 && (curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && echo OLLAMA_READY || (sleep 5 && curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && echo OLLAMA_READY || echo OLLAMA_SKIP))"
+      }
+    },
+    {
+      "when": "{{platform === 'linux'}}",
+      "method": "shell.run",
+      "params": {
+        "message": "ollama serve > /dev/null 2>&1 & sleep 3 && (curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && echo OLLAMA_READY || (sleep 5 && curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && echo OLLAMA_READY || echo OLLAMA_SKIP))"
       }
     },
     {
       "when": "{{platform === 'win32'}}",
       "method": "shell.run",
       "params": {
-        "message": "start /B ollama serve"
+        "message": "powershell -Command \"Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden; Start-Sleep -Seconds 5; try { Invoke-WebRequest -Uri http://127.0.0.1:11434/api/tags -UseBasicParsing -TimeoutSec 5 | Out-Null; Write-Output 'OLLAMA_READY' } catch { Start-Sleep -Seconds 5; try { Invoke-WebRequest -Uri http://127.0.0.1:11434/api/tags -UseBasicParsing -TimeoutSec 5 | Out-Null; Write-Output 'OLLAMA_READY' } catch { Write-Output 'OLLAMA_SKIP' } }\""
       }
     },
+
     {
       "method": "shell.run",
       "params": {
         "venv": "venv",
+        "path": "{{cwd}}",
         "message": "python server/app.py --port {{port}}",
         "on": [{
           "event": "/(http:\\/\\/[0-9.:]+)/",
           "done": true
         }],
         "env": {
-          "DATA_DIR": "{{cwd}}{{platform === 'win32' ? '\\\\data' : '/data'}}",
+          "DATA_DIR": "{{platform === 'win32' ? cwd + '\\\\data' : cwd + '/data'}}",
           "OLLAMA_URL": "http://127.0.0.1:11434",
           "PYTHONIOENCODING": "utf-8",
           "PYTHONUTF8": "1"

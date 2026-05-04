@@ -905,6 +905,7 @@
     function createCompany() {
       var name = document.getElementById('companyName').value.trim();
       if (!name) { showNotification('Ingresa el nombre de la empresa', 'error'); return; }
+      if (name.length > 200) { showNotification('El nombre no puede exceder 200 caracteres', 'error'); return; }
 
       fetch('/api/companies', {
         method: 'POST',
@@ -965,7 +966,7 @@
 
     function sendAutoInterviewStart() {
       if (!currentCompanyId) return;
-      fetch('/api/chat', {
+      fetch('/api/chat/interview', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -992,6 +993,7 @@
       var input = document.getElementById('interviewInput');
       var message = input.value.trim();
       if (!message || !currentCompanyId) return;
+      if (message.length > 10000) { showNotification('El mensaje es demasiado largo (máximo 10.000 caracteres)', 'error'); return; }
 
       var msgs = document.getElementById('interviewMessages');
       msgs.innerHTML += '<div class="chat-message user">' + escapeHtml(message) + '</div>';
@@ -1003,7 +1005,7 @@
 
       document.getElementById('btnSendInterview').disabled = true;
 
-      fetch('/api/chat', {
+      fetch('/api/chat/interview', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -1342,6 +1344,22 @@
     function saveMonthEdit() {
       if (!currentCompanyId) return;
       var index = parseInt(document.getElementById('editMonthIndex').value);
+      // Validar campos requeridos
+      var monthCode = document.getElementById('editMonthCode').value.trim();
+      var monthLabel = document.getElementById('editMonthLabel').value.trim();
+      if (!monthCode || !monthLabel) {
+        showNotification('El c\u00f3digo y nombre del mes son requeridos', 'error');
+        return;
+      }
+      // Validar que los valores numéricos no sean negativos
+      var numFields = ['editSales','editOtherIncome','editVarCosts','editFixedCosts','editVarExpenses','editDebtPayments','editTaxes','editInvestments'];
+      for (var f = 0; f < numFields.length; f++) {
+        var val = parseFloat(document.getElementById(numFields[f]).value);
+        if (isNaN(val) || val < 0) {
+          showNotification('Los valores num\u00e9ricos deben ser mayores o iguales a 0', 'error');
+          return;
+        }
+      }
       var monthData = {
         month: document.getElementById('editMonthCode').value,
         label: document.getElementById('editMonthLabel').value,

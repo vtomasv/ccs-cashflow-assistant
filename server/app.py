@@ -2,12 +2,14 @@
 CCS Cashflow Assistant — Backend FastAPI
 Plugin de Pinokio para gestión de flujos de caja con IA local para PYMEs.
 
-Arquitectura:
-  - Módulo de Empresas: CRUD de empresas y onboarding
-  - Módulo de Flujo de Caja: construcción y análisis financiero
-  - Módulo de Escenarios: simulación de variables
-  - Módulo de Agentes: orquestación de LLMs locales vía Ollama
-  - Módulo de Exportación: generación de Excel/CSV
+Seguridad aplicada:
+  - Sanitización de IDs (prevención de path traversal)
+  - CORS restringido a localhost
+  - Rate limiting en endpoints de generación
+  - Validación de tamaño de inputs
+  - Nombres de archivo sanitizados en exportación
+  - Datos financieros anonimizados en logs
+  - Auto-recuperación de Ollama si no está corriendo
 """
 
 import os
@@ -20,9 +22,13 @@ import asyncio
 import logging
 import threading
 import argparse
+import subprocess
+import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from collections import defaultdict
 
 # Forzar UTF-8 en stdout/stderr para Windows
 if sys.platform == "win32":
@@ -32,11 +38,11 @@ if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import requests as http_requests
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 
 # ---------------------------------------------------------------------------
 # Configuración de rutas (siempre absolutas desde __file__)
@@ -60,24 +66,97 @@ def _parse_port():
         return 7860
 
 PORT = _parse_port()
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
-# Timeouts configurables
-OLLAMA_TIMEOUT_DEFAULT = int(os.environ.get("OLLAMA_TIMEOUT", "300"))
-OLLAMA_TIMEOUT_ANALYSIS = int(os.environ.get("OLLAMA_TIMEOUT_ANALYSIS", "600"))
-OLLAMA_TIMEOUT_SIMULATION = int(os.environ.get("OLLAMA_TIMEOUT_SIMULATION", "600"))
+# Timeouts configurables (config.json > env var > default)
+def _get_timeout(task_type: str = "default") -> int:
+    """Lee timeout desde config.json, luego env var, luego default."""
+    config = load_json(DATA_DIR / "config.json", {})
+    timeout_map = {
+        "default": ("OLLAMA_TIMEOUT", 300),
+        "analysis": ("OLLAMA_TIMEOUT_ANALYSIS", 600),
+        "simulation": ("OLLAMA_TIMEOUT_SIMULATION", 600),
+    }
+    env_key, default_val = timeout_map.get(task_type, ("OLLAMA_TIMEOUT", 300))
+    config_key = f"ollama_timeout_{task_type}" if task_type != "default" else "ollama_timeout"
+    return int(config.get(config_key) or os.getenv(env_key) or default_val)
+
+# Límites de seguridad
+MAX_MESSAGE_LENGTH = 10000  # Máximo caracteres por mensaje de chat
+MAX_COMPANY_NAME_LENGTH = 200
+MAX_MONTHS = 60  # Máximo meses en un flujo de caja
+RATE_LIMIT_WINDOW = 60  # segundos
+RATE_LIMIT_MAX_REQUESTS = 20  # máximo de requests de generación por ventana
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging (sin datos financieros sensibles)
 # ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cashflow-assistant")
 
 # ---------------------------------------------------------------------------
+# Seguridad: Sanitización de IDs y nombres de archivo
+# ---------------------------------------------------------------------------
+_SAFE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_SAFE_FILENAME_CHARS = re.compile(r"[^\w\s\-.]", re.UNICODE)
+
+def _sanitize_id(value: str) -> str:
+    """Valida que un ID sea seguro (previene path traversal)."""
+    if not value or not _SAFE_ID_PATTERN.match(value):
+        raise HTTPException(400, f"ID inválido: solo se permiten caracteres alfanuméricos, guiones y guiones bajos (máx 64 chars).")
+    return value
+
+def _sanitize_filename(name: str) -> str:
+    """Sanitiza un nombre para uso seguro en nombres de archivo."""
+    if not name:
+        return "empresa"
+    # Normalizar unicode, remover caracteres peligrosos
+    name = unicodedata.normalize("NFKD", name)
+    name = _SAFE_FILENAME_CHARS.sub("", name)
+    name = name.strip().replace(" ", "_")
+    # Limitar longitud y prevenir nombres vacíos
+    name = name[:50] if name else "empresa"
+    # Prevenir nombres reservados de Windows
+    reserved = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
+                "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+                "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
+    if name.upper().split(".")[0] in reserved:
+        name = f"_{name}"
+    return name
+
+# ---------------------------------------------------------------------------
+# Rate Limiting simple (en memoria)
+# ---------------------------------------------------------------------------
+_rate_limit_store: Dict[str, list] = defaultdict(list)
+
+def _check_rate_limit(key: str, max_requests: int = RATE_LIMIT_MAX_REQUESTS, window: int = RATE_LIMIT_WINDOW):
+    """Verifica rate limit por clave. Lanza HTTPException 429 si se excede."""
+    now = time.time()
+    # Limpiar entradas antiguas
+    _rate_limit_store[key] = [t for t in _rate_limit_store[key] if now - t < window]
+    if len(_rate_limit_store[key]) >= max_requests:
+        raise HTTPException(429, f"Demasiadas solicitudes. Espera {window} segundos.")
+    _rate_limit_store[key].append(now)
+
+# ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="CCS Cashflow Assistant", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="CCS Cashflow Assistant", version="0.2.0")
+
+# CORS restringido a localhost (Pinokio siempre corre en localhost)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "http://0.0.0.0:*",
+        "null",  # Pinokio webview puede enviar origin: null
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$",
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
 
 # ---------------------------------------------------------------------------
 # Utilidades de persistencia
@@ -95,7 +174,7 @@ def load_json(path: Path, default=None):
     return default if default is not None else {}
 
 # ---------------------------------------------------------------------------
-# Utilidades de Ollama
+# Utilidades de Ollama con auto-recuperación
 # ---------------------------------------------------------------------------
 def _fix_encoding(text: str) -> str:
     """Repara texto UTF-8 mal interpretado como latin-1."""
@@ -147,6 +226,48 @@ def _extract_json_from_llm(text: str):
             pass
     return None
 
+def ensure_ollama_running() -> bool:
+    """Verifica que Ollama esté corriendo; intenta iniciarlo si no lo está."""
+    try:
+        r = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        pass
+    # Intentar iniciar Ollama en background
+    try:
+        logger.info("Ollama no responde. Intentando iniciar...")
+        if sys.platform == "win32":
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        # Esperar hasta 15 segundos con reintentos
+        for attempt in range(5):
+            time.sleep(3)
+            try:
+                r = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+                if r.status_code == 200:
+                    logger.info("Ollama iniciado correctamente.")
+                    return True
+            except Exception:
+                continue
+        logger.warning("No se pudo iniciar Ollama automáticamente.")
+        return False
+    except FileNotFoundError:
+        logger.error("Ollama no está instalado en este sistema.")
+        return False
+    except Exception as e:
+        logger.error(f"Error al intentar iniciar Ollama: {e}")
+        return False
+
 _pull_status: dict = {}
 
 def _is_model_available(model: str) -> bool:
@@ -181,7 +302,10 @@ def _do_pull(model: str):
 def call_ollama(model: str, system_prompt: str, user_message: str,
                 temperature: float = 0.7, timeout: int = None) -> str:
     if timeout is None:
-        timeout = OLLAMA_TIMEOUT_DEFAULT
+        timeout = _get_timeout("default")
+    # Auto-recuperación: intentar iniciar Ollama si no responde
+    if not ensure_ollama_running():
+        raise HTTPException(503, "Ollama no está disponible. Verifica que esté instalado y ejecutándose.")
     try:
         resp = http_requests.post(
             f"{OLLAMA_URL}/api/chat",
@@ -211,7 +335,9 @@ def call_ollama(model: str, system_prompt: str, user_message: str,
 def call_ollama_chat(model: str, messages: list, temperature: float = 0.7, timeout: int = None) -> str:
     """Llamada a Ollama con historial de mensajes completo."""
     if timeout is None:
-        timeout = OLLAMA_TIMEOUT_DEFAULT
+        timeout = _get_timeout("default")
+    if not ensure_ollama_running():
+        raise HTTPException(503, "Ollama no está disponible.")
     try:
         resp = http_requests.post(
             f"{OLLAMA_URL}/api/chat",
@@ -239,9 +365,10 @@ def call_ollama_chat(model: str, messages: list, temperature: float = 0.7, timeo
 # Carga de agentes y prompts
 # ---------------------------------------------------------------------------
 def get_agents() -> dict:
-    return load_json(DATA_DIR / "agents" / "agents.json", {"version": "0.1.0", "agents": []})
+    return load_json(DATA_DIR / "agents" / "agents.json", {"version": "0.2.0", "agents": []})
 
 def get_agent(agent_id: str) -> dict:
+    _sanitize_id(agent_id)
     agents = get_agents()
     for a in agents.get("agents", []):
         if a["id"] == agent_id:
@@ -249,33 +376,131 @@ def get_agent(agent_id: str) -> dict:
     return None
 
 def get_prompt(prompt_name: str) -> str:
-    path = DATA_DIR / "prompts" / "system" / f"{prompt_name}.md"
+    # Sanitizar nombre de prompt para prevenir path traversal
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", prompt_name)
+    if not safe_name:
+        return ""
+    path = DATA_DIR / "prompts" / "system" / f"{safe_name}.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
-    path = DEFAULTS_DIR / "prompts" / f"{prompt_name}.md"
+    path = DEFAULTS_DIR / "prompts" / f"{safe_name}.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
 
 # ---------------------------------------------------------------------------
-# Modelos Pydantic
+# Modelos Pydantic con validación
 # ---------------------------------------------------------------------------
+class CompanyCreate(BaseModel):
+    name: str
+    sector: str = ""
+    description: str = ""
+
+    @validator("name")
+    def validate_name(cls, v):
+        if not v or not v.strip():
+            raise ValueError("El nombre de la empresa es requerido.")
+        if len(v) > MAX_COMPANY_NAME_LENGTH:
+            raise ValueError(f"El nombre no puede exceder {MAX_COMPANY_NAME_LENGTH} caracteres.")
+        return v.strip()
+
+class ChatMessage(BaseModel):
+    company_id: str
+    message: str
+    session_id: str = ""
+
+    @validator("message")
+    def validate_message(cls, v):
+        if not v or not v.strip():
+            raise ValueError("El mensaje no puede estar vacío.")
+        if len(v) > MAX_MESSAGE_LENGTH:
+            raise ValueError(f"El mensaje no puede exceder {MAX_MESSAGE_LENGTH} caracteres.")
+        return v.strip()
+
+class ScenarioRequest(BaseModel):
+    instruction: str
+
+    @validator("instruction")
+    def validate_instruction(cls, v):
+        if not v or not v.strip():
+            raise ValueError("La instrucción no puede estar vacía.")
+        if len(v) > MAX_MESSAGE_LENGTH:
+            raise ValueError(f"La instrucción no puede exceder {MAX_MESSAGE_LENGTH} caracteres.")
+        return v.strip()
+
+class AgentConfigUpdate(BaseModel):
+    model: str = None
+    temperature: float = None
+    system_prompt: str = None
+
+    @validator("temperature")
+    def validate_temperature(cls, v):
+        if v is not None and (v < 0.0 or v > 2.0):
+            raise ValueError("La temperatura debe estar entre 0.0 y 2.0.")
+        return v
+
+    @validator("system_prompt")
+    def validate_system_prompt(cls, v):
+        if v is not None and len(v) > 50000:
+            raise ValueError("El prompt del sistema no puede exceder 50000 caracteres.")
+        return v
+
+class MonthData(BaseModel):
+    month: str = None
+    label: str = None
+    income: dict = None
+    expenses: dict = None
+
 # ---------------------------------------------------------------------------
 # Normalización de datos de flujo de caja
 # ---------------------------------------------------------------------------
+def _to_num(val) -> float:
+    """Convierte un valor a número de forma robusta.
+    Soporta formatos: 1000000, 1.000.000 (CLP), $1.000.000, -500.
+    """
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        # Remover símbolos de moneda y espacios
+        clean = val.strip().replace("$", "").replace(" ", "")
+        # Detectar formato con puntos como separador de miles (ej: 1.000.000)
+        # Si hay más de un punto, son separadores de miles
+        if clean.count(".") > 1:
+            clean = clean.replace(".", "")
+        # Si hay punto y coma, la coma es decimal (formato europeo)
+        elif "." in clean and "," in clean:
+            clean = clean.replace(".", "").replace(",", ".")
+        # Si solo hay coma, puede ser decimal
+        elif "," in clean and "." not in clean:
+            # Si la coma está en posición de miles (ej: 1,000,000)
+            parts = clean.split(",")
+            if all(len(p) == 3 for p in parts[1:]):
+                clean = clean.replace(",", "")
+            else:
+                clean = clean.replace(",", ".")
+        # Remover caracteres no numéricos excepto punto y signo negativo
+        clean = re.sub(r"[^\d.\-]", "", clean)
+        try:
+            return float(clean) if clean else 0.0
+        except ValueError:
+            return 0.0
+    return 0.0
+
 def _normalize_month(m: dict) -> dict:
-    """Asegura que un mes tenga todos los campos requeridos y totales correctos."""
+    """Normaliza un mes individual: asegura estructura y recalcula totales."""
     income = m.get("income", {})
     if not isinstance(income, dict):
         income = {}
-    sales = _to_num(income.get("sales", 0))
-    other_income = _to_num(income.get("other_income", 0))
-    income_total = sales + other_income
-    income = {"sales": sales, "other_income": other_income, "total": income_total}
-
     expenses = m.get("expenses", {})
     if not isinstance(expenses, dict):
         expenses = {}
+
+    sales = _to_num(income.get("sales", 0))
+    other_income = _to_num(income.get("other_income", 0))
+    income_total = sales + other_income
+
     variable_costs = _to_num(expenses.get("variable_costs", 0))
     fixed_costs = _to_num(expenses.get("fixed_costs", 0))
     variable_expenses = _to_num(expenses.get("variable_expenses", 0))
@@ -283,38 +508,29 @@ def _normalize_month(m: dict) -> dict:
     taxes = _to_num(expenses.get("taxes", 0))
     investments = _to_num(expenses.get("investments", 0))
     expenses_total = variable_costs + fixed_costs + variable_expenses + debt_payments + taxes + investments
-    expenses = {
-        "variable_costs": variable_costs,
-        "fixed_costs": fixed_costs,
-        "variable_expenses": variable_expenses,
-        "debt_payments": debt_payments,
-        "taxes": taxes,
-        "investments": investments,
-        "total": expenses_total
-    }
 
     net_flow = income_total - expenses_total
 
     return {
         "month": m.get("month", ""),
-        "label": m.get("label", ""),
-        "income": income,
-        "expenses": expenses,
+        "label": m.get("label", m.get("month", "")),
+        "income": {
+            "sales": sales,
+            "other_income": other_income,
+            "total": income_total
+        },
+        "expenses": {
+            "variable_costs": variable_costs,
+            "fixed_costs": fixed_costs,
+            "variable_expenses": variable_expenses,
+            "debt_payments": debt_payments,
+            "taxes": taxes,
+            "investments": investments,
+            "total": expenses_total
+        },
         "net_flow": net_flow,
-        "cumulative_balance": 0  # se recalcula después
+        "cumulative_balance": 0  # Se recalcula en normalize_cashflow
     }
-
-def _to_num(val) -> float:
-    """Convierte un valor a número, retorna 0 si no es posible."""
-    if isinstance(val, (int, float)):
-        return val
-    if isinstance(val, str):
-        try:
-            cleaned = val.replace("$", "").replace(".", "").replace(",", "").strip()
-            return float(cleaned)
-        except (ValueError, TypeError):
-            return 0
-    return 0
 
 def normalize_cashflow(data: dict) -> dict:
     """Normaliza un flujo de caja completo: recalcula totales, saldos acumulados y summary."""
@@ -322,10 +538,13 @@ def normalize_cashflow(data: dict) -> dict:
     if not isinstance(months, list):
         months = []
 
+    # Limitar cantidad de meses por seguridad
+    months = months[:MAX_MONTHS]
+
     normalized_months = []
-    cumulative = 0
-    total_income = 0
-    total_expenses = 0
+    cumulative = 0.0
+    total_income = 0.0
+    total_expenses = 0.0
 
     for m in months:
         nm = _normalize_month(m)
@@ -335,51 +554,25 @@ def normalize_cashflow(data: dict) -> dict:
         total_expenses += nm["expenses"]["total"]
         normalized_months.append(nm)
 
+    num_months = len(normalized_months)
     net_cashflow = total_income - total_expenses
-    num_months = len(normalized_months) or 1
+    avg_balance = cumulative / num_months if num_months > 0 else 0
 
     data["months"] = normalized_months
     data["summary"] = {
         "total_income": total_income,
         "total_expenses": total_expenses,
         "net_cashflow": net_cashflow,
-        "average_monthly_balance": round(net_cashflow / num_months)
+        "average_monthly_balance": avg_balance,
+        "num_months": num_months
     }
-    data["period_months"] = len(normalized_months)
-    data["updated_at"] = datetime.now().isoformat()
+
     return data
 
-
-class CompanyCreate(BaseModel):
-    name: str
-    sector: str = ""
-    size: str = ""
-    description: str = ""
-
-class ChatMessage(BaseModel):
-    company_id: str
-    message: str
-    session_id: Optional[str] = None
-
-class MonthData(BaseModel):
-    month: str = ""
-    label: str = ""
-    income: Optional[Dict[str, Any]] = None
-    expenses: Optional[Dict[str, Any]] = None
-
-class ScenarioRequest(BaseModel):
-    company_id: str
-    instruction: str
-
-class AgentConfigUpdate(BaseModel):
-    model: Optional[str] = None
-    temperature: Optional[float] = None
-    system_prompt: Optional[str] = None
-
 # ---------------------------------------------------------------------------
-# Estado de generación en background
+# Estado de generación (en memoria)
 # ---------------------------------------------------------------------------
-_generation_status: Dict[str, dict] = {}
+_generation_status: dict = {}
 
 # ---------------------------------------------------------------------------
 # Endpoints: Health
@@ -387,45 +580,58 @@ _generation_status: Dict[str, dict] = {}
 @app.get("/api/health")
 async def health():
     ollama_ok = False
+    ollama_models = []
     try:
-        r = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        ollama_ok = r.status_code == 200
+        r = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        if r.status_code == 200:
+            ollama_ok = True
+            ollama_models = [m["name"] for m in r.json().get("models", [])]
     except Exception:
         pass
-    return {"status": "ok", "ollama": ollama_ok, "version": "0.1.0"}
+    return {
+        "status": "ok",
+        "ollama": "connected" if ollama_ok else "disconnected",
+        "ollama_models": ollama_models,
+        "version": "0.2.0",
+        "platform": sys.platform
+    }
 
 # ---------------------------------------------------------------------------
-# Endpoints: Empresas
+# Endpoints: Empresas (con sanitización de IDs)
 # ---------------------------------------------------------------------------
-@app.get("/api/companies")
-async def list_companies():
-    companies_dir = DATA_DIR / "companies"
-    companies_dir.mkdir(parents=True, exist_ok=True)
-    companies = []
-    for f in companies_dir.glob("*/company.json"):
-        companies.append(load_json(f))
-    return {"companies": companies}
-
-@app.post("/api/companies")
+@app.post("/api/companies", status_code=201)
 async def create_company(data: CompanyCreate):
     company_id = str(uuid.uuid4())[:8]
     company = {
         "id": company_id,
         "name": data.name,
         "sector": data.sector,
-        "size": data.size,
         "description": data.description,
-        "status": "pending",
+        "status": "new",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat()
     }
     company_dir = DATA_DIR / "companies" / company_id
     company_dir.mkdir(parents=True, exist_ok=True)
     save_json(company_dir / "company.json", company)
+    logger.info(f"Empresa creada: {company_id}")
     return company
+
+@app.get("/api/companies")
+async def list_companies():
+    companies_dir = DATA_DIR / "companies"
+    companies_dir.mkdir(parents=True, exist_ok=True)
+    companies = []
+    for d in sorted(companies_dir.iterdir()):
+        if d.is_dir():
+            c = load_json(d / "company.json")
+            if c:
+                companies.append(c)
+    return {"companies": companies}
 
 @app.get("/api/companies/{company_id}")
 async def get_company(company_id: str):
+    company_id = _sanitize_id(company_id)
     path = DATA_DIR / "companies" / company_id / "company.json"
     if not path.exists():
         raise HTTPException(404, "Empresa no encontrada")
@@ -433,28 +639,52 @@ async def get_company(company_id: str):
 
 @app.delete("/api/companies/{company_id}")
 async def delete_company(company_id: str):
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
-    if company_dir.exists():
-        shutil.rmtree(company_dir)
+    if not company_dir.exists():
+        raise HTTPException(404, "Empresa no encontrada")
+    shutil.rmtree(str(company_dir))
+    # Limpiar sesiones asociadas
+    sessions_dir = DATA_DIR / "sessions"
+    if sessions_dir.exists():
+        for f in sessions_dir.glob(f"{company_id}_*.json"):
+            f.unlink()
+    # Limpiar escenarios asociados
+    scenarios_dir = DATA_DIR / "scenarios"
+    if scenarios_dir.exists():
+        for f in scenarios_dir.glob(f"{company_id}_*.json"):
+            f.unlink()
+    logger.info(f"Empresa eliminada: {company_id}")
     return {"status": "deleted"}
 
 # ---------------------------------------------------------------------------
-# Endpoints: Chat / Entrevista Financiera
+# Endpoints: Chat de Entrevista
 # ---------------------------------------------------------------------------
-@app.post("/api/chat")
-async def chat(data: ChatMessage):
-    company_dir = DATA_DIR / "companies" / data.company_id
+@app.post("/api/chat/interview")
+async def chat_interview(data: ChatMessage):
+    company_id = _sanitize_id(data.company_id)
+    company_dir = DATA_DIR / "companies" / company_id
     if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
 
     company = load_json(company_dir / "company.json")
 
-    # Cargar o crear sesión
-    session_id = data.session_id or str(uuid.uuid4())[:8]
-    session_path = DATA_DIR / "sessions" / f"{data.company_id}_{session_id}.json"
-    session = load_json(session_path, {"id": session_id, "company_id": data.company_id, "messages": [], "created_at": datetime.now().isoformat()})
+    # Rate limiting por empresa
+    _check_rate_limit(f"chat_{company_id}")
 
-    # Obtener agente y prompt
+    # Cargar o crear sesión
+    session_id = data.session_id or f"int_{str(uuid.uuid4())[:8]}"
+    # Sanitizar session_id
+    session_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64]
+    session_path = DATA_DIR / "sessions" / f"{company_id}_{session_id}.json"
+    session = load_json(session_path, {
+        "id": session_id,
+        "company_id": company_id,
+        "type": "interview",
+        "messages": [],
+        "created_at": datetime.now().isoformat()
+    })
+
     agent = get_agent("financial_interviewer")
     if not agent:
         raise HTTPException(500, "Agente entrevistador no configurado")
@@ -463,38 +693,28 @@ async def chat(data: ChatMessage):
     if agent.get("system_prompt"):
         system_prompt = agent["system_prompt"]
 
-    # Contexto de la empresa
-    company_context = f"\nDatos de la empresa:\n- Nombre: {company.get('name', 'Sin nombre')}\n- Sector: {company.get('sector', 'No especificado')}\n- Tamaño: {company.get('size', 'No especificado')}\n- Descripción: {company.get('description', 'Sin descripción')}\n"
+    # Construir contexto
+    context = f"Empresa: {company.get('name', 'Sin nombre')}\nSector: {company.get('sector', 'No especificado')}\n"
+    if company.get("description"):
+        context += f"Descripción: {company['description']}\n"
 
-    # Cargar flujo de caja existente si hay
-    cashflow_path = company_dir / "cashflow.json"
-    if cashflow_path.exists():
-        cf = load_json(cashflow_path)
-        company_context += f"\nYa existe un flujo de caja generado con {len(cf.get('months', []))} meses de proyección.\n"
-
-    full_system = system_prompt + company_context
-
-    # Construir mensajes para Ollama
-    messages = [{"role": "system", "content": full_system}]
+    messages = [{"role": "system", "content": system_prompt + "\n\nCONTEXTO:\n" + context}]
     for msg in session.get("messages", []):
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": data.message})
 
-    # Llamar a Ollama
     response = call_ollama_chat(
         model=agent.get("model", "llama3.2:3b"),
         messages=messages,
-        temperature=agent.get("temperature", 0.7),
-        timeout=OLLAMA_TIMEOUT_DEFAULT
+        temperature=agent.get("temperature", 0.7)
     )
 
-    # Guardar en sesión
     session["messages"].append({"role": "user", "content": data.message, "timestamp": datetime.now().isoformat()})
     session["messages"].append({"role": "assistant", "content": response, "timestamp": datetime.now().isoformat()})
     save_json(session_path, session)
 
     # Actualizar estado de la empresa
-    if company.get("status") == "pending":
+    if company.get("status") == "new":
         company["status"] = "interviewing"
         company["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "company.json", company)
@@ -510,9 +730,13 @@ async def chat(data: ChatMessage):
 # ---------------------------------------------------------------------------
 @app.post("/api/companies/{company_id}/generate-cashflow")
 async def generate_cashflow(company_id: str, background_tasks: BackgroundTasks):
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
+
+    # Rate limiting
+    _check_rate_limit(f"gen_{company_id}", max_requests=5, window=120)
 
     task_id = str(uuid.uuid4())[:8]
     _generation_status[task_id] = {"status": "generating", "progress": 0, "error": None}
@@ -534,6 +758,10 @@ def _generate_cashflow_task(company_id: str, task_id: str):
                 all_messages.append(f"{msg['role'].upper()}: {msg['content']}")
 
         conversation_text = "\n".join(all_messages)
+
+        # Limitar tamaño de la conversación para evitar desbordamiento
+        if len(conversation_text) > 50000:
+            conversation_text = conversation_text[:50000] + "\n[... conversación truncada por longitud ...]"
 
         _generation_status[task_id]["progress"] = 30
 
@@ -562,7 +790,7 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
             system_prompt=system_prompt,
             user_message=user_message,
             temperature=agent.get("temperature", 0.3),
-            timeout=OLLAMA_TIMEOUT_ANALYSIS
+            timeout=_get_timeout("analysis")
         )
 
         _generation_status[task_id]["progress"] = 80
@@ -579,7 +807,7 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
         cashflow_data["company_id"] = company_id
         cashflow_data["created_at"] = datetime.now().isoformat()
         save_json(company_dir / "cashflow.json", cashflow_data)
-        logger.info(f"Flujo de caja normalizado: {len(cashflow_data.get('months', []))} meses, summary={cashflow_data.get('summary', {})}")
+        logger.info(f"Flujo de caja generado: {len(cashflow_data.get('months', []))} meses para empresa {company_id}")
 
         # Actualizar estado de la empresa
         company["status"] = "complete"
@@ -587,18 +815,19 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
         save_json(company_dir / "company.json", company)
 
         _generation_status[task_id] = {"status": "done", "progress": 100, "error": None}
-        logger.info(f"Flujo de caja generado para empresa {company_id}")
 
     except Exception as e:
-        logger.error(f"Error generando flujo de caja: {e}")
+        logger.error(f"Error generando flujo de caja para {company_id}: {type(e).__name__}")
         _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e)}
 
 @app.get("/api/generation/{task_id}/progress")
 async def get_generation_progress(task_id: str):
+    task_id = re.sub(r"[^a-zA-Z0-9_-]", "", task_id)[:64]
     return _generation_status.get(task_id, {"status": "unknown", "progress": 0, "error": "Tarea no encontrada"})
 
 @app.get("/api/companies/{company_id}/cashflow")
 async def get_cashflow(company_id: str):
+    company_id = _sanitize_id(company_id)
     path = DATA_DIR / "companies" / company_id / "cashflow.json"
     if not path.exists():
         raise HTTPException(404, "Flujo de caja no encontrado. Genera uno primero.")
@@ -613,6 +842,7 @@ async def get_cashflow(company_id: str):
 @app.put("/api/companies/{company_id}/cashflow/months/{month_index}")
 async def update_month(company_id: str, month_index: int, month_data: MonthData):
     """Actualiza un mes específico del flujo de caja por índice (0-based)."""
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
     if not cashflow_path.exists():
@@ -647,6 +877,7 @@ async def update_month(company_id: str, month_index: int, month_data: MonthData)
 @app.post("/api/companies/{company_id}/cashflow/months")
 async def add_month(company_id: str, month_data: MonthData):
     """Agrega un nuevo mes al flujo de caja."""
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
     if not cashflow_path.exists():
@@ -654,6 +885,9 @@ async def add_month(company_id: str, month_data: MonthData):
 
     cashflow = load_json(cashflow_path)
     months = cashflow.get("months", [])
+
+    if len(months) >= MAX_MONTHS:
+        raise HTTPException(400, f"No se pueden agregar más de {MAX_MONTHS} meses.")
 
     new_month = {
         "month": month_data.month or "",
@@ -672,6 +906,7 @@ async def add_month(company_id: str, month_data: MonthData):
 @app.delete("/api/companies/{company_id}/cashflow/months/{month_index}")
 async def delete_month(company_id: str, month_index: int):
     """Elimina un mes del flujo de caja por índice (0-based)."""
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
     if not cashflow_path.exists():
@@ -696,10 +931,14 @@ async def delete_month(company_id: str, month_index: int):
 # ---------------------------------------------------------------------------
 @app.post("/api/companies/{company_id}/simulate")
 async def simulate_scenario(company_id: str, data: ScenarioRequest, background_tasks: BackgroundTasks):
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
     if not cashflow_path.exists():
         raise HTTPException(404, "No hay flujo de caja base para simular.")
+
+    # Rate limiting
+    _check_rate_limit(f"sim_{company_id}", max_requests=10, window=120)
 
     task_id = str(uuid.uuid4())[:8]
     _generation_status[task_id] = {"status": "generating", "progress": 0, "error": None}
@@ -741,7 +980,7 @@ Aplica los cambios solicitados y devuelve el flujo de caja completo actualizado 
             system_prompt=system_prompt,
             user_message=user_message,
             temperature=agent.get("temperature", 0.4),
-            timeout=OLLAMA_TIMEOUT_SIMULATION
+            timeout=_get_timeout("simulation")
         )
 
         _generation_status[task_id]["progress"] = 80
@@ -763,14 +1002,15 @@ Aplica los cambios solicitados y devuelve el flujo de caja completo actualizado 
         save_json(scenarios_dir / f"{company_id}_{scenario_id}.json", scenario_data)
 
         _generation_status[task_id] = {"status": "done", "progress": 100, "error": None, "scenario_id": scenario_id}
-        logger.info(f"Escenario {scenario_id} generado para empresa {company_id}")
+        logger.info(f"Escenario generado para empresa {company_id}")
 
     except Exception as e:
-        logger.error(f"Error en simulación: {e}")
+        logger.error(f"Error en simulación para {company_id}: {type(e).__name__}")
         _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e)}
 
 @app.get("/api/companies/{company_id}/scenarios")
 async def list_scenarios(company_id: str):
+    company_id = _sanitize_id(company_id)
     scenarios_dir = DATA_DIR / "scenarios"
     scenarios_dir.mkdir(parents=True, exist_ok=True)
     scenarios = []
@@ -780,6 +1020,7 @@ async def list_scenarios(company_id: str):
 
 @app.get("/api/scenarios/{scenario_id}")
 async def get_scenario(scenario_id: str):
+    scenario_id = _sanitize_id(scenario_id)
     scenarios_dir = DATA_DIR / "scenarios"
     for f in scenarios_dir.glob(f"*_{scenario_id}.json"):
         return load_json(f)
@@ -787,6 +1028,7 @@ async def get_scenario(scenario_id: str):
 
 @app.delete("/api/scenarios/{scenario_id}")
 async def delete_scenario(scenario_id: str):
+    scenario_id = _sanitize_id(scenario_id)
     scenarios_dir = DATA_DIR / "scenarios"
     for f in scenarios_dir.glob(f"*_{scenario_id}.json"):
         f.unlink()
@@ -798,7 +1040,8 @@ async def delete_scenario(scenario_id: str):
 # ---------------------------------------------------------------------------
 @app.post("/api/chat/simulate")
 async def chat_simulate(data: ChatMessage):
-    company_dir = DATA_DIR / "companies" / data.company_id
+    company_id = _sanitize_id(data.company_id)
+    company_dir = DATA_DIR / "companies" / company_id
     if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
 
@@ -806,12 +1049,16 @@ async def chat_simulate(data: ChatMessage):
     if not cashflow_path.exists():
         raise HTTPException(404, "Primero genera un flujo de caja base.")
 
+    # Rate limiting
+    _check_rate_limit(f"simchat_{company_id}")
+
     cashflow = load_json(cashflow_path)
 
     # Cargar o crear sesión de simulación
     session_id = data.session_id or f"sim_{str(uuid.uuid4())[:8]}"
-    session_path = DATA_DIR / "sessions" / f"{data.company_id}_{session_id}.json"
-    session = load_json(session_path, {"id": session_id, "company_id": data.company_id, "type": "simulation", "messages": [], "created_at": datetime.now().isoformat()})
+    session_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64]
+    session_path = DATA_DIR / "sessions" / f"{company_id}_{session_id}.json"
+    session = load_json(session_path, {"id": session_id, "company_id": company_id, "type": "simulation", "messages": [], "created_at": datetime.now().isoformat()})
 
     agent = get_agent("scenario_simulator")
     if not agent:
@@ -833,7 +1080,7 @@ async def chat_simulate(data: ChatMessage):
         model=agent.get("model", "llama3.1:8b"),
         messages=messages,
         temperature=agent.get("temperature", 0.4),
-        timeout=OLLAMA_TIMEOUT_SIMULATION
+        timeout=_get_timeout("simulation")
     )
 
     session["messages"].append({"role": "user", "content": data.message, "timestamp": datetime.now().isoformat()})
@@ -852,10 +1099,11 @@ async def chat_simulate(data: ChatMessage):
     }
 
 # ---------------------------------------------------------------------------
-# Endpoints: Exportación
+# Endpoints: Exportación (con nombres de archivo sanitizados)
 # ---------------------------------------------------------------------------
 @app.get("/api/companies/{company_id}/export/excel")
 async def export_excel(company_id: str):
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
     if not cashflow_path.exists():
@@ -957,10 +1205,11 @@ async def export_excel(company_id: str):
         for i, rec in enumerate(recs, row + 1):
             ws2.cell(row=i, column=1, value=f"• {rec}")
 
-    # Guardar
+    # Guardar con nombre sanitizado
     exports_dir = DATA_DIR / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"flujo_caja_{company.get('name', 'empresa').replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    safe_name = _sanitize_filename(company.get("name", "empresa"))
+    filename = f"flujo_caja_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     filepath = exports_dir / filename
     wb.save(str(filepath))
 
@@ -972,6 +1221,7 @@ async def export_excel(company_id: str):
 
 @app.get("/api/companies/{company_id}/export/csv")
 async def export_csv(company_id: str):
+    company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
     if not cashflow_path.exists():
@@ -981,11 +1231,11 @@ async def export_csv(company_id: str):
     company = load_json(company_dir / "company.json")
 
     import csv
-    import io
 
     exports_dir = DATA_DIR / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"flujo_caja_{company.get('name', 'empresa').replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    safe_name = _sanitize_filename(company.get("name", "empresa"))
+    filename = f"flujo_caja_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     filepath = exports_dir / filename
 
     with open(str(filepath), "w", newline="", encoding="utf-8-sig") as f:
@@ -1024,6 +1274,7 @@ async def get_agent_endpoint(agent_id: str):
 
 @app.put("/api/agents/{agent_id}")
 async def update_agent(agent_id: str, config: AgentConfigUpdate):
+    agent_id = _sanitize_id(agent_id)
     agents_data = get_agents()
     for i, a in enumerate(agents_data.get("agents", [])):
         if a["id"] == agent_id:
@@ -1061,6 +1312,7 @@ async def available_models():
 # ---------------------------------------------------------------------------
 @app.get("/api/companies/{company_id}/sessions")
 async def list_sessions(company_id: str):
+    company_id = _sanitize_id(company_id)
     sessions_dir = DATA_DIR / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     sessions = []
@@ -1077,7 +1329,10 @@ async def list_sessions(company_id: str):
 # ---------------------------------------------------------------------------
 # Montar archivos estáticos y arrancar
 # ---------------------------------------------------------------------------
-app.mount("/ui", StaticFiles(directory=str(APP_DIR), html=True), name="ui")
+if APP_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=str(APP_DIR), html=True), name="ui")
+else:
+    logger.warning(f"Directorio de UI no encontrado: {APP_DIR}")
 
 @app.on_event("startup")
 async def startup():
@@ -1096,7 +1351,9 @@ async def startup():
             dst = prompts_dst / f.name
             if not dst.exists():
                 shutil.copy2(str(f), str(dst))
-    logger.info(f"CCS Cashflow Assistant iniciado en puerto {PORT}")
+    # Intentar asegurar que Ollama esté corriendo
+    threading.Thread(target=ensure_ollama_running, daemon=True).start()
+    logger.info(f"CCS Cashflow Assistant v0.2.0 iniciado en puerto {PORT} ({sys.platform})")
 
 @app.get("/")
 async def root():
