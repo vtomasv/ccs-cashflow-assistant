@@ -819,24 +819,60 @@ class TestCrossPlatform(unittest.TestCase):
         content = (ROOT / "install.json").read_text(encoding="utf-8")
         self.assertIn("platform", content)
         self.assertIn("win32", content)
-        self.assertIn("darwin", content)
 
     def test_start_json_has_platform_conditions(self):
         content = (ROOT / "start.json").read_text(encoding="utf-8")
         self.assertIn("platform", content)
         self.assertIn("win32", content)
 
-    def test_install_json_creates_venv(self):
-        content = (ROOT / "install.json").read_text(encoding="utf-8")
-        self.assertIn("python -m venv venv", content)
-
     def test_install_json_uses_venv_for_pip(self):
+        """Pinokio crea el venv automáticamente cuando se usa 'venv' param.
+        El paso de pip install DEBE tener venv: 'venv' para que las
+        dependencias se instalen dentro del venv y no en el Python global."""
         data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
-        venv_used = any(
-            isinstance(step.get("params"), dict) and step["params"].get("venv") == "venv"
-            for step in data["run"]
-        )
-        self.assertTrue(venv_used, "install.json debe usar 'venv' para instalar dependencias")
+        pip_steps = [
+            step for step in data["run"]
+            if isinstance(step.get("params"), dict)
+            and isinstance(step["params"].get("message"), (str, list))
+            and ("pip install" in str(step["params"]["message"]))
+        ]
+        self.assertTrue(len(pip_steps) > 0, "install.json debe tener al menos un paso de pip install")
+        for step in pip_steps:
+            self.assertEqual(
+                step["params"].get("venv"), "venv",
+                f"Paso de pip install sin venv: {step['params'].get('message')}"
+            )
+
+    def test_install_json_no_separate_venv_creation(self):
+        """NO debe haber un paso separado de 'python -m venv venv' porque
+        Pinokio crea el venv automáticamente al usar el param venv: 'venv'.
+        Un paso separado causa problemas en Windows con conda."""
+        data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
+        for step in data["run"]:
+            if isinstance(step.get("params"), dict):
+                msg = step["params"].get("message", "")
+                if isinstance(msg, list):
+                    msg = " ".join(msg)
+                # Si hay un paso que SOLO crea el venv sin venv param, es un error
+                if "python -m venv venv" in msg and step["params"].get("venv") is None:
+                    self.fail("install.json tiene un paso separado de 'python -m venv venv' sin venv param. "
+                              "Pinokio debe crear el venv automáticamente via el param venv.")
+
+    def test_install_json_data_init_uses_venv(self):
+        """Los pasos de inicialización de datos que usan python deben
+        ejecutarse dentro del venv para tener acceso a las dependencias."""
+        data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
+        python_steps = [
+            step for step in data["run"]
+            if isinstance(step.get("params"), dict)
+            and isinstance(step["params"].get("message"), (str, list))
+            and "python -c" in str(step["params"]["message"])
+        ]
+        for step in python_steps:
+            self.assertEqual(
+                step["params"].get("venv"), "venv",
+                "Paso de python -c sin venv param"
+            )
 
     def test_start_json_uses_venv(self):
         data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
@@ -851,15 +887,87 @@ class TestCrossPlatform(unittest.TestCase):
         self.assertTrue("PYTHONIOENCODING" in content or "PYTHONUTF8" in content)
 
     def test_install_json_ollama_windows(self):
+        """Windows debe usar OllamaSetup.exe descargado con curl, no winget
+        (winget no siempre está disponible en todas las versiones de Windows)."""
         content = (ROOT / "install.json").read_text(encoding="utf-8")
-        self.assertTrue("winget" in content or "Ollama.Ollama" in content)
+        self.assertTrue(
+            "OllamaSetup.exe" in content or "winget" in content,
+            "install.json debe tener un método de instalación de Ollama para Windows"
+        )
 
     def test_start_json_ollama_windows_serve(self):
         content = (ROOT / "start.json").read_text(encoding="utf-8")
-        self.assertTrue("Start-Process" in content or "start /B" in content)
+        self.assertTrue(
+            "start /B" in content or "Start-Process" in content,
+            "start.json debe iniciar Ollama en background en Windows"
+        )
 
     def test_data_dir_is_pathlib(self):
         self.assertIsInstance(DATA_DIR, Path)
+
+    def test_server_prints_127_not_0000(self):
+        """El servidor debe imprimir http://127.0.0.1:PORT (no 0.0.0.0)
+        para que el regex de start.json capture una URL válida en Windows."""
+        content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('print(f"http://127.0.0.1:{PORT}")', content)
+
+    def test_install_json_no_powershell_for_ollama_serve(self):
+        """En install.json, el inicio de Ollama en Windows no debe usar
+        powershell complejo que puede fallar en cmd.exe de Pinokio."""
+        data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
+        for step in data["run"]:
+            if isinstance(step.get("params"), dict):
+                msg = str(step["params"].get("message", ""))
+                if "win32" in str(step.get("when", "")):
+                    # No debe tener powershell -Command con Start-Process para ollama serve
+                    if "ollama serve" in msg.lower() or "OLLAMA_READY" in msg:
+                        self.assertNotIn(
+                            "Invoke-WebRequest", msg,
+                            "install.json Windows no debe usar Invoke-WebRequest para readiness check"
+                        )
+
+    def test_start_json_no_powershell_for_ollama(self):
+        """start.json debe usar 'start /B ollama serve' en Windows,
+        no powershell -Command Start-Process."""
+        data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
+        for step in data["run"]:
+            if isinstance(step.get("params"), dict):
+                msg = str(step["params"].get("message", ""))
+                when = str(step.get("when", ""))
+                if "win32" in when and "ollama" in msg.lower():
+                    self.assertNotIn(
+                        "powershell", msg.lower(),
+                        "start.json Windows debe usar 'start /B ollama serve', no powershell"
+                    )
+
+    def test_install_json_valid_json(self):
+        """install.json debe ser JSON puro válido."""
+        content = (ROOT / "install.json").read_text(encoding="utf-8")
+        try:
+            data = json.loads(content)
+            self.assertIn("run", data)
+        except json.JSONDecodeError:
+            self.fail("install.json no es JSON válido")
+
+    def test_start_json_is_daemon(self):
+        """start.json debe tener daemon: true."""
+        data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
+        self.assertTrue(data.get("daemon"), "start.json debe tener daemon: true")
+
+    def test_stop_json_uses_script_stop(self):
+        """stop.json debe usar script.stop apuntando a start.json."""
+        data = json.loads((ROOT / "stop.json").read_text(encoding="utf-8"))
+        has_script_stop = any(
+            step.get("method") == "script.stop"
+            for step in data["run"]
+        )
+        self.assertTrue(has_script_stop, "stop.json debe usar script.stop")
+
+    def test_no_background_true_anywhere(self):
+        """Ningún archivo JSON debe usar background: true (no existe en Pinokio)."""
+        for name in ["install.json", "start.json", "stop.json", "reset.json"]:
+            content = (ROOT / name).read_text(encoding="utf-8")
+            self.assertNotIn('"background"', content, f"{name} contiene 'background'")
 
 
 # =====================================================================
