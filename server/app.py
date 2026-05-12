@@ -597,6 +597,268 @@ async def health():
     }
 
 # ---------------------------------------------------------------------------
+# Endpoints: Readiness (semáforo de sistema)
+# ---------------------------------------------------------------------------
+@app.get("/api/readiness")
+async def check_readiness():
+    """Verifica si la aplicación está lista para ser usada.
+    Comprueba: Ollama disponible, al menos un modelo descargado,
+    y que no haya descargas críticas en curso."""
+    issues = []
+    ready = True
+
+    # Verificar Ollama
+    ollama_ok = False
+    models = []
+    try:
+        resp = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        if resp.status_code == 200:
+            ollama_ok = True
+            models = [m["name"] for m in resp.json().get("models", [])]
+    except Exception:
+        pass
+
+    if not ollama_ok:
+        ready = False
+        issues.append({
+            "type": "ollama_unavailable",
+            "message": "Ollama no está disponible. Asegúrate de que esté instalado y corriendo.",
+            "severity": "critical",
+        })
+
+    if ollama_ok and not models:
+        ready = False
+        issues.append({
+            "type": "no_models",
+            "message": "No hay modelos de IA descargados. Se están descargando automáticamente...",
+            "severity": "warning",
+        })
+
+    # Verificar descargas en curso
+    active_pulls = []
+    for model_name, info in _pull_status.items():
+        if info.get("status") in ("queued", "pulling"):
+            active_pulls.append({
+                "model": model_name,
+                "status": info.get("status"),
+                "progress": info.get("progress", 0),
+            })
+
+    if active_pulls:
+        issues.append({
+            "type": "models_downloading",
+            "message": f"Descargando {len(active_pulls)} modelo(s) de IA...",
+            "severity": "info",
+            "pulls": active_pulls,
+        })
+
+    return {
+        "ready": ready and not active_pulls,
+        "ollama_available": ollama_ok,
+        "models_count": len(models),
+        "models": models,
+        "active_pulls": active_pulls,
+        "issues": issues,
+    }
+
+# ---------------------------------------------------------------------------
+# Endpoints: Ollama Status
+# ---------------------------------------------------------------------------
+@app.get("/api/ollama/status")
+async def ollama_status():
+    """Verifica si Ollama está disponible y lista los modelos instalados."""
+    try:
+        resp = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        models = [m["name"] for m in resp.json().get("models", [])]
+        return {"available": True, "models": models}
+    except Exception:
+        return {"available": False, "models": []}
+
+# ---------------------------------------------------------------------------
+# Endpoints: Hardware Performance (semáforo de modelos)
+# ---------------------------------------------------------------------------
+@app.get("/api/hardware/performance")
+async def get_hardware_performance():
+    """Detecta hardware del sistema y estima rendimiento de modelos instalados.
+    Inspirado en canirun.ai: muestra semáforo de rendimiento por modelo."""
+    import platform as plat
+
+    # --- Detectar hardware ---
+    hw = {
+        "platform": sys.platform,
+        "platform_name": plat.system(),
+        "architecture": plat.machine(),
+        "cpu_count": os.cpu_count() or 1,
+        "ram_gb": 0,
+        "gpu_name": "No detectada",
+        "vram_gb": 0,
+    }
+
+    # RAM total
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            c_ulonglong = ctypes.c_ulonglong
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", c_ulonglong),
+                            ("ullAvailPhys", c_ulonglong),
+                            ("ullTotalPageFile", c_ulonglong),
+                            ("ullAvailPageFile", c_ulonglong),
+                            ("ullTotalVirtual", c_ulonglong),
+                            ("ullAvailVirtual", c_ulonglong),
+                            ("ullAvailExtendedVirtual", c_ulonglong)]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            hw["ram_gb"] = round(stat.ullTotalPhys / (1024**3), 1)
+        elif sys.platform == "darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=5)
+            hw["ram_gb"] = round(int(out.strip()) / (1024**3), 1)
+        else:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal"):
+                        kb = int(line.split()[1])
+                        hw["ram_gb"] = round(kb / (1024**2), 1)
+                        break
+    except Exception as e:
+        logger.debug(f"No se pudo detectar RAM: {e}")
+
+    # GPU (intentar detectar via nvidia-smi o Apple Silicon)
+    try:
+        if sys.platform == "darwin" and plat.machine() == "arm64":
+            hw["gpu_name"] = f"Apple Silicon ({plat.processor() or 'M-series'})"
+            hw["vram_gb"] = hw["ram_gb"]
+        else:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                timeout=5, stderr=subprocess.DEVNULL
+            ).decode().strip()
+            if out:
+                parts = out.split(",")
+                hw["gpu_name"] = parts[0].strip()
+                hw["vram_gb"] = round(int(parts[1].strip()) / 1024, 1) if len(parts) > 1 else 0
+    except Exception:
+        pass
+
+    # --- Obtener modelos instalados ---
+    models_perf = []
+    try:
+        resp = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        if resp.status_code == 200:
+            for m in resp.json().get("models", []):
+                model_name = m.get("name", "")
+                model_size_bytes = m.get("size", 0)
+                model_size_gb = round(model_size_bytes / (1024**3), 1)
+
+                params_b = _estimate_model_params(model_name)
+                tps = _estimate_tokens_per_second(
+                    params_b, hw["ram_gb"], hw["vram_gb"],
+                    hw["cpu_count"], hw["gpu_name"]
+                )
+                grade = _compute_grade(tps, model_size_gb, hw["ram_gb"])
+
+                models_perf.append({
+                    "model": model_name,
+                    "size_gb": model_size_gb,
+                    "params_b": params_b,
+                    "estimated_tps": tps,
+                    "grade": grade["grade"],
+                    "grade_label": grade["label"],
+                    "grade_color": grade["color"],
+                    "score": grade["score"],
+                    "ram_pct": round((model_size_gb / hw["ram_gb"]) * 100, 1) if hw["ram_gb"] > 0 else 100,
+                })
+    except Exception as e:
+        logger.debug(f"No se pudieron obtener modelos para performance: {e}")
+
+    return {"hardware": hw, "models": models_perf}
+
+
+def _estimate_model_params(model_name: str) -> float:
+    """Estima los parámetros (en billones) de un modelo por su nombre."""
+    name_lower = model_name.lower()
+    match = re.search(r'(\d+\.?\d*)b', name_lower)
+    if match:
+        return float(match.group(1))
+    if "1b" in name_lower or "1.1b" in name_lower:
+        return 1.0
+    if "3b" in name_lower:
+        return 3.0
+    if "7b" in name_lower or "8b" in name_lower:
+        return 8.0
+    if "13b" in name_lower or "14b" in name_lower:
+        return 14.0
+    if "32b" in name_lower or "34b" in name_lower:
+        return 32.0
+    if "70b" in name_lower:
+        return 70.0
+    return 7.0
+
+
+def _estimate_tokens_per_second(
+    params_b: float, ram_gb: float, vram_gb: float,
+    cpu_count: int, gpu_name: str
+) -> int:
+    """Estima tokens por segundo basado en hardware y tamaño del modelo."""
+    model_gb = params_b * 0.6
+
+    is_apple_silicon = "apple" in gpu_name.lower() or "m1" in gpu_name.lower() or "m2" in gpu_name.lower() or "m3" in gpu_name.lower() or "m4" in gpu_name.lower()
+    has_nvidia = "nvidia" in gpu_name.lower() or "geforce" in gpu_name.lower() or "rtx" in gpu_name.lower()
+
+    if is_apple_silicon:
+        available = ram_gb
+        if model_gb > available * 0.8:
+            return max(1, int(5 * (available / model_gb)))
+        bandwidth_factor = min(2.0, ram_gb / 16.0)
+        base_tps = 60 / (params_b / 8.0)
+        return max(1, int(base_tps * bandwidth_factor))
+
+    elif has_nvidia and vram_gb > 0:
+        if model_gb <= vram_gb * 0.9:
+            base_tps = 80 / (params_b / 8.0)
+            return max(1, int(base_tps))
+        elif model_gb <= vram_gb + ram_gb * 0.5:
+            return max(1, int(20 / (params_b / 8.0)))
+        else:
+            return max(1, int(5 / (params_b / 8.0)))
+
+    else:
+        if model_gb > ram_gb * 0.7:
+            return max(1, int(2 * (ram_gb / model_gb)))
+        core_factor = min(2.0, cpu_count / 8.0)
+        base_tps = 25 / (params_b / 8.0)
+        return max(1, int(base_tps * core_factor))
+
+
+def _compute_grade(tps: int, model_size_gb: float, ram_gb: float) -> dict:
+    """Calcula el grado/semáforo de rendimiento para un modelo."""
+    if ram_gb > 0 and model_size_gb > ram_gb * 0.9:
+        return {"grade": "F", "label": "NO EJECUTABLE", "color": "#dc2626", "score": 0}
+
+    if tps >= 30:
+        score = min(100, 80 + int((tps - 30) * 0.5))
+        return {"grade": "S", "label": "EXCELENTE", "color": "#22c55e", "score": score}
+    elif tps >= 15:
+        score = 65 + int((tps - 15) * 1.0)
+        return {"grade": "A", "label": "MUY BUENO", "color": "#4ade80", "score": score}
+    elif tps >= 8:
+        score = 50 + int((tps - 8) * 2.0)
+        return {"grade": "B", "label": "ACEPTABLE", "color": "#facc15", "score": score}
+    elif tps >= 4:
+        score = 30 + int((tps - 4) * 5.0)
+        return {"grade": "C", "label": "AJUSTADO", "color": "#f97316", "score": score}
+    elif tps >= 2:
+        score = 15 + int((tps - 2) * 7.5)
+        return {"grade": "D", "label": "MUY LENTO", "color": "#ef4444", "score": score}
+    else:
+        return {"grade": "F", "label": "NO RECOMENDADO", "color": "#dc2626", "score": max(0, tps * 7)}
+
+
+# ---------------------------------------------------------------------------
 # Endpoints: Empresas (con sanitización de IDs)
 # ---------------------------------------------------------------------------
 @app.post("/api/companies", status_code=201)

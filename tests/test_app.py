@@ -737,6 +737,168 @@ class TestModelsEndpoints(unittest.TestCase):
 
 
 # =====================================================================
+# READINESS, HARDWARE PERFORMANCE & OLLAMA STATUS ENDPOINTS
+# =====================================================================
+class TestReadinessEndpoints(unittest.TestCase):
+
+    @patch("app.http_requests.get")
+    def test_readiness_all_ok(self, mock_get):
+        """Cuando Ollama responde y hay modelos, readiness debe ser ready."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"models": [{"name": "llama3.2:3b"}]}
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+        response = client.get("/api/readiness")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        # Verificar estructura de respuesta
+        self.assertIn("ready", data)
+        self.assertIn("ollama_available", data)
+        self.assertIn("models_count", data)
+        self.assertIn("models", data)
+        self.assertIn("issues", data)
+        # Cuando Ollama responde con modelos, debe estar ready
+        self.assertTrue(data["ready"])
+        self.assertTrue(data["ollama_available"])
+        self.assertGreater(data["models_count"], 0)
+
+    @patch("app.http_requests.get", side_effect=Exception("Connection refused"))
+    def test_readiness_ollama_down(self, mock_get):
+        """Cuando Ollama no responde, readiness debe ser not_ready."""
+        response = client.get("/api/readiness")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ready"])
+        self.assertFalse(data["ollama_available"])
+        # Debe reportar issue cr\u00edtico
+        self.assertTrue(len(data["issues"]) > 0)
+        self.assertEqual(data["issues"][0]["severity"], "critical")
+
+    @patch("app.http_requests.get")
+    def test_ollama_status(self, mock_get):
+        """Endpoint /api/ollama/status debe retornar estado de Ollama."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"models": [{"name": "llama3.2:3b"}]}
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+        response = client.get("/api/ollama/status")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("available", data)
+        self.assertIn("models", data)
+        self.assertTrue(data["available"])
+        self.assertIn("llama3.2:3b", data["models"])
+
+    @patch("app.http_requests.get", side_effect=Exception("Connection refused"))
+    def test_ollama_status_offline(self, mock_get):
+        """Cuando Ollama no responde, status debe indicar offline."""
+        response = client.get("/api/ollama/status")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["available"])
+        self.assertEqual(data["models"], [])
+
+    @patch("app.http_requests.get")
+    def test_hardware_performance(self, mock_get):
+        """Endpoint /api/hardware/performance debe retornar grades de modelos."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"models": [{"name": "llama3.2:3b", "size": 2000000000}]}
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+        response = client.get("/api/hardware/performance")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("hardware", data)
+        self.assertIn("models", data)
+        self.assertIn("ram_gb", data["hardware"])
+        self.assertIsInstance(data["models"], list)
+        if len(data["models"]) > 0:
+            model_info = data["models"][0]
+            self.assertIn("model", model_info)
+            self.assertIn("grade", model_info)
+            self.assertIn("grade_label", model_info)
+            self.assertIn("grade_color", model_info)
+            self.assertIn(model_info["grade"], ["S", "A", "B", "C", "D", "F"])
+
+    @patch("app.http_requests.get", side_effect=Exception("Connection refused"))
+    def test_hardware_performance_offline(self, mock_get):
+        """Cuando Ollama no responde, performance debe retornar lista vac\u00eda de modelos."""
+        response = client.get("/api/hardware/performance")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("hardware", data)
+        self.assertIn("ram_gb", data["hardware"])
+        self.assertEqual(data["models"], [])
+
+
+# =====================================================================
+# UX FRONTEND: Readiness Banner, Global Loading, Model Semaphore
+# =====================================================================
+class TestFrontendUX(unittest.TestCase):
+
+    def setUp(self):
+        self.html = (ROOT / "app" / "index.html").read_text(encoding="utf-8")
+
+    def test_readiness_banner_exists(self):
+        """El frontend debe tener un banner de readiness."""
+        self.assertIn("readiness-banner", self.html)
+
+    def test_global_loading_overlay_exists(self):
+        """El frontend debe tener un overlay global de carga."""
+        self.assertIn("globalLoadingOverlay", self.html)
+
+    def test_show_global_loading_function(self):
+        """Debe existir la función showGlobalLoading."""
+        self.assertIn("function showGlobalLoading", self.html)
+
+    def test_hide_global_loading_function(self):
+        """Debe existir la función hideGlobalLoading."""
+        self.assertIn("function hideGlobalLoading", self.html)
+
+    def test_check_readiness_function(self):
+        """Debe existir la función checkReadiness."""
+        self.assertIn("function checkReadiness", self.html)
+
+    def test_safe_display_value_function(self):
+        """Debe existir la función safeDisplayValue para prevenir [object Object]."""
+        self.assertIn("function safeDisplayValue", self.html)
+
+    def test_model_performance_section(self):
+        """El frontend debe tener una sección de rendimiento de modelos."""
+        self.assertIn("modelPerfContainer", self.html)
+
+    def test_load_model_performance_function(self):
+        """Debe existir la función loadModelPerformance."""
+        self.assertIn("function loadModelPerformance", self.html)
+
+    def test_buttons_disabled_during_generation(self):
+        """Los botones deben deshabilitarse durante la generación."""
+        self.assertIn(".disabled = true", self.html)
+
+    def test_input_disabled_during_chat(self):
+        """El input de chat debe deshabilitarse durante la respuesta del modelo."""
+        self.assertIn("input.disabled = true", self.html)
+
+    def test_friendly_loading_messages(self):
+        """Deben existir mensajes amigables durante la carga."""
+        # Verificar que hay mensajes descriptivos de estado
+        self.assertIn("analizando", self.html)
+        self.assertIn("Generando", self.html)
+
+    def test_dompurify_loaded(self):
+        """DOMPurify debe estar cargado para sanitización."""
+        self.assertIn("purify.min.js", self.html)
+
+    def test_readiness_polls_periodically(self):
+        """checkReadiness debe llamarse periódicamente."""
+        self.assertIn("setInterval", self.html)
+        self.assertIn("checkReadiness", self.html)
+
+
+# =====================================================================
 # VALIDACIÓN PINOKIO: Estructura
 # =====================================================================
 class TestPinokioStructure(unittest.TestCase):
@@ -860,7 +1022,8 @@ class TestCrossPlatform(unittest.TestCase):
 
     def test_install_json_data_init_uses_venv(self):
         """Los pasos de inicialización de datos que usan python deben
-        ejecutarse dentro del venv para tener acceso a las dependencias."""
+        ejecutarse dentro del venv (ya sea via param venv o referenciando
+        directamente el binario del venv como venv/bin/python)."""
         data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
         python_steps = [
             step for step in data["run"]
@@ -869,9 +1032,12 @@ class TestCrossPlatform(unittest.TestCase):
             and "python -c" in str(step["params"]["message"])
         ]
         for step in python_steps:
-            self.assertEqual(
-                step["params"].get("venv"), "venv",
-                "Paso de python -c sin venv param"
+            msg = str(step["params"]["message"])
+            has_venv_param = step["params"].get("venv") == "venv"
+            uses_venv_binary = "venv/bin/python" in msg or "venv\\Scripts\\python" in msg
+            self.assertTrue(
+                has_venv_param or uses_venv_binary,
+                f"Paso de python -c sin venv param ni referencia al binario del venv: {msg[:80]}"
             )
 
     def test_start_json_uses_venv(self):
@@ -954,14 +1120,26 @@ class TestCrossPlatform(unittest.TestCase):
         data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
         self.assertTrue(data.get("daemon"), "start.json debe tener daemon: true")
 
-    def test_stop_json_uses_script_stop(self):
-        """stop.json debe usar script.stop apuntando a start.json."""
+    def test_stop_json_kills_process_cross_platform(self):
+        """stop.json debe usar shell.run con pkill (unix) y wmic (win32)
+        para detener el servidor de forma cross-platform."""
         data = json.loads((ROOT / "stop.json").read_text(encoding="utf-8"))
-        has_script_stop = any(
-            step.get("method") == "script.stop"
+        content = (ROOT / "stop.json").read_text(encoding="utf-8")
+        # Debe tener al menos un paso para unix y otro para windows
+        has_unix_kill = any(
+            isinstance(step.get("params"), dict)
+            and "pkill" in str(step["params"].get("message", ""))
+            and "win32" not in str(step.get("when", "")) or "!==" in str(step.get("when", ""))
             for step in data["run"]
         )
-        self.assertTrue(has_script_stop, "stop.json debe usar script.stop")
+        has_win_kill = any(
+            isinstance(step.get("params"), dict)
+            and ("wmic" in str(step["params"].get("message", "")).lower()
+                 or "taskkill" in str(step["params"].get("message", "")).lower())
+            for step in data["run"]
+        )
+        self.assertTrue(has_unix_kill, "stop.json debe usar pkill para unix")
+        self.assertTrue(has_win_kill, "stop.json debe usar wmic/taskkill para Windows")
 
     def test_no_background_true_anywhere(self):
         """Ningún archivo JSON debe usar background: true (no existe en Pinokio)."""

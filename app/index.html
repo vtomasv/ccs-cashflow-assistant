@@ -301,6 +301,102 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ===== READINESS BANNER ===== */
+    .readiness-banner {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 900;
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 20px; font-size: 12px; font-weight: 600;
+      transition: all 0.3s ease;
+    }
+    .readiness-banner.readiness-ready {
+      background: linear-gradient(90deg, #ecfdf5, #d1fae5);
+      color: #065f46; border-top: 2px solid #10b981;
+    }
+    .readiness-banner.readiness-warning {
+      background: linear-gradient(90deg, #fffbeb, #fef3c7);
+      color: #92400e; border-top: 2px solid #f59e0b;
+    }
+    .readiness-banner.readiness-error {
+      background: linear-gradient(90deg, #fef2f2, #fee2e2);
+      color: #991b1b; border-top: 2px solid #ef4444;
+    }
+    .readiness-banner.readiness-checking {
+      background: linear-gradient(90deg, #eff6ff, #dbeafe);
+      color: #1e40af; border-top: 2px solid #3b82f6;
+    }
+    .readiness-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .readiness-ready .readiness-dot { background: #10b981; box-shadow: 0 0 6px #10b981; }
+    .readiness-warning .readiness-dot { background: #f59e0b; animation: pulse 1.5s infinite; }
+    .readiness-error .readiness-dot { background: #ef4444; animation: pulse 1s infinite; }
+    .readiness-checking .readiness-dot { background: #3b82f6; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* ===== GLOBAL LOADING OVERLAY ===== */
+    .global-loading-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2000;
+      background: rgba(255,255,255,0.92); backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .global-loading-content { text-align: center; }
+    .global-loading-spinner {
+      width: 48px; height: 48px; margin: 0 auto 16px;
+      border: 4px solid rgba(13,61,166,0.15); border-top-color: var(--ccs-azul-oscuro);
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    .global-loading-title {
+      font-size: 16px; font-weight: 700; color: var(--ccs-azul-oscuro); margin-bottom: 6px;
+    }
+    .global-loading-detail {
+      font-size: 13px; color: var(--text-muted);
+    }
+
+    /* ===== MODEL PERFORMANCE BADGE ===== */
+    .model-perf-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;
+      border: 1px solid rgba(0,0,0,0.08);
+    }
+    .model-perf-badge .grade { font-size: 13px; font-weight: 800; }
+    .model-perf-badge .tps { font-size: 10px; opacity: 0.8; }
+    .model-perf-section {
+      margin-top: 12px; padding: 12px; background: var(--bg-base);
+      border-radius: var(--radius); border: 1px solid var(--border);
+    }
+    .model-perf-section-title {
+      font-size: 11px; font-weight: 700; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px;
+    }
+    .model-perf-list { display: flex; flex-direction: column; gap: 6px; }
+    .model-perf-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 10px; background: #fff; border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .model-perf-name { font-size: 12px; font-weight: 600; color: var(--text-main); }
+    .model-perf-bar {
+      width: 60px; height: 6px; border-radius: 3px; background: #e5e7eb; overflow: hidden;
+    }
+    .model-perf-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+
+    /* ===== GENERATION PROGRESS PANEL ===== */
+    .generation-progress-panel {
+      background: var(--bg-base); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; margin-top: 12px;
+    }
+    .generation-progress-panel .progress-bar-container {
+      width: 100%; height: 8px; border-radius: 4px; background: #e5e7eb;
+      overflow: hidden; margin: 8px 0;
+    }
+    .generation-progress-panel .progress-bar-fill {
+      height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--ccs-azul), var(--ccs-verde));
+      transition: width 0.5s ease;
+    }
+    .generation-progress-panel .progress-label {
+      font-size: 12px; color: var(--text-muted); text-align: center;
+    }
+
     /* ===== SCENARIO SLIDER ===== */
     .slider-group { margin-bottom: 16px; }
     .slider-label { display: flex; justify-content: space-between; margin-bottom: 4px; }
@@ -630,6 +726,25 @@
           </div>
           <div id="agentsList"></div>
         </div>
+
+        <!-- Sem&aacute;foro de rendimiento de modelos -->
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <div>
+              <div class="card-title"><i class="fa-solid fa-gauge-high"></i> Rendimiento de Modelos</div>
+              <div class="card-subtitle">Sem&aacute;foro de rendimiento estimado seg&uacute;n tu hardware</div>
+            </div>
+            <button class="btn btn-secondary" onclick="loadModelPerformance()">
+              <i class="fa-solid fa-arrows-rotate"></i> Actualizar
+            </button>
+          </div>
+          <div class="model-perf-section">
+            <div class="model-perf-section-title">Modelos Instalados</div>
+            <div class="model-perf-list" id="modelPerfContainer">
+              <p style="font-size:12px;color:var(--text-muted)">Cargando informaci&oacute;n de rendimiento...</p>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   </div>
@@ -732,8 +847,26 @@
     </div>
   </div>
 
+  <!-- ===== READINESS BANNER ===== -->
+  <div id="readinessBanner" class="readiness-banner readiness-checking">
+    <div class="readiness-dot"></div>
+    <span class="readiness-text">Verificando estado del sistema...</span>
+  </div>
+
+  <!-- ===== GLOBAL LOADING OVERLAY ===== -->
+  <div id="globalLoadingOverlay" class="global-loading-overlay" style="display:none">
+    <div class="global-loading-content">
+      <div class="global-loading-spinner"></div>
+      <div class="global-loading-title" id="globalLoadingTitle">Procesando...</div>
+      <div class="global-loading-detail" id="globalLoadingDetail">Por favor espera, la IA est&aacute; trabajando</div>
+    </div>
+  </div>
+
   <!-- ===== NOTIFICATIONS ===== -->
   <div class="notification-area" id="notificationArea"></div>
+
+  <!-- DOMPurify for HTML sanitization -->
+  <script src="lib/purify.min.js"></script>
 
   <script>
     /* ===== ESTADO GLOBAL ===== */
@@ -749,27 +882,57 @@
 
     /* ===== INICIALIZACIÓN ===== */
     function init() {
-      checkOllama();
+      checkReadiness();
       loadCompanies();
       loadAvailableModels();
+      loadModelPerformance();
+      // Polling continuo de readiness cada 15 segundos
+      setInterval(checkReadiness, 15000);
     }
 
-    function checkOllama() {
-      fetch('/api/health')
+    /* ===== READINESS (semáforo de sistema) ===== */
+    function checkReadiness() {
+      fetch('/api/readiness')
         .then(function(r) { return r.json(); })
         .then(function(data) {
+          var banner = document.getElementById('readinessBanner');
           var el = document.getElementById('ollamaStatus');
-          if (data.ollama) {
-            el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--ccs-verde);font-size:8px"></i> Ollama conectado';
+          banner.className = 'readiness-banner';
+
+          if (data.ready) {
+            banner.classList.add('readiness-ready');
+            banner.querySelector('.readiness-text').textContent = 'Sistema listo — ' + data.models_count + ' modelo(s) disponible(s)';
+            el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--ccs-verde);font-size:8px"></i> Sistema listo';
             el.style.color = 'var(--ccs-verde)';
-          } else {
+          } else if (!data.ollama_available) {
+            banner.classList.add('readiness-error');
+            banner.querySelector('.readiness-text').textContent = 'Ollama no est\u00e1 disponible. Verifica que est\u00e9 instalado y corriendo.';
             el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--danger);font-size:8px"></i> Ollama desconectado';
             el.style.color = 'var(--danger)';
+          } else if (data.active_pulls && data.active_pulls.length > 0) {
+            banner.classList.add('readiness-warning');
+            var pullMsg = 'Descargando modelo';
+            if (data.active_pulls[0].progress > 0) {
+              pullMsg += ' (' + data.active_pulls[0].progress + '%)';
+            }
+            pullMsg += '... La aplicaci\u00f3n estar\u00e1 lista en breve.';
+            banner.querySelector('.readiness-text').textContent = pullMsg;
+            el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--warning);font-size:8px"></i> Descargando modelo';
+            el.style.color = 'var(--warning)';
+          } else {
+            banner.classList.add('readiness-warning');
+            var issueMsg = data.issues && data.issues.length > 0 ? data.issues[0].message : 'Verificando sistema...';
+            banner.querySelector('.readiness-text').textContent = issueMsg;
+            el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--warning);font-size:8px"></i> Preparando';
+            el.style.color = 'var(--warning)';
           }
         })
         .catch(function() {
+          var banner = document.getElementById('readinessBanner');
+          banner.className = 'readiness-banner readiness-error';
+          banner.querySelector('.readiness-text').textContent = 'No se puede conectar con el servidor.';
           var el = document.getElementById('ollamaStatus');
-          el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--danger);font-size:8px"></i> Error de conexi&oacute;n';
+          el.innerHTML = '<i class="fa-solid fa-circle" style="color:var(--danger);font-size:8px"></i> Sin conexi\u00f3n';
           el.style.color = 'var(--danger)';
         });
     }
@@ -779,6 +942,74 @@
         .then(function(r) { return r.json(); })
         .then(function(data) { availableModels = data.models || []; })
         .catch(function() { availableModels = []; });
+    }
+
+    /* ===== GLOBAL LOADING OVERLAY (bloqueo de UI) ===== */
+    function showGlobalLoading(title, detail) {
+      var overlay = document.getElementById('globalLoadingOverlay');
+      document.getElementById('globalLoadingTitle').textContent = title || 'Procesando...';
+      document.getElementById('globalLoadingDetail').textContent = detail || 'Por favor espera, la IA est\u00e1 trabajando';
+      overlay.style.display = 'flex';
+    }
+
+    function hideGlobalLoading() {
+      document.getElementById('globalLoadingOverlay').style.display = 'none';
+    }
+
+    /* ===== SAFE DISPLAY VALUE (previene [object Object]) ===== */
+    function safeDisplayValue(val) {
+      if (val === null || val === undefined) return '';
+      if (typeof val === 'object') {
+        try { return JSON.stringify(val); } catch(e) { return '[datos]'; }
+      }
+      return String(val);
+    }
+
+    /* ===== MODEL PERFORMANCE (semáforo de modelos) ===== */
+    function loadModelPerformance() {
+      fetch('/api/hardware/performance')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          renderModelPerformance(data);
+        })
+        .catch(function() { /* silencioso si falla */ });
+    }
+
+    function renderModelPerformance(data) {
+      var container = document.getElementById('modelPerfContainer');
+      if (!container) return;
+      if (!data.models || data.models.length === 0) {
+        container.innerHTML = '<p style="font-size:12px;color:var(--text-muted)">No hay modelos instalados.</p>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < data.models.length; i++) {
+        var m = data.models[i];
+        html += '<div class="model-perf-item">';
+        html += '<span class="model-perf-name">' + escapeHtml(safeDisplayValue(m.model)) + '</span>';
+        html += '<div style="display:flex;align-items:center;gap:8px">';
+        html += '<div class="model-perf-bar"><div class="model-perf-bar-fill" style="width:' + Math.min(100, m.score || 0) + '%;background:' + (m.grade_color || '#ccc') + '"></div></div>';
+        html += '<span class="model-perf-badge" style="background:' + (m.grade_color || '#ccc') + '22;color:' + (m.grade_color || '#666') + '">';
+        html += '<span class="grade">' + escapeHtml(safeDisplayValue(m.grade)) + '</span>';
+        html += '<span class="tps">' + (m.estimated_tps || 0) + ' tok/s</span>';
+        html += '</span>';
+        html += '</div></div>';
+      }
+      container.innerHTML = html;
+    }
+
+    /* ===== SET LOADING (genérico para botones) ===== */
+    function setLoading(btnId, loading, originalHtml) {
+      var btn = document.getElementById(btnId);
+      if (!btn) return;
+      if (loading) {
+        btn.disabled = true;
+        btn.setAttribute('data-original-html', btn.innerHTML);
+        btn.innerHTML = '<span class="loading-spinner"></span> Procesando...';
+      } else {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml || btn.getAttribute('data-original-html') || btn.innerHTML;
+      }
     }
 
     /* ===== NAVEGACIÓN ===== */
@@ -993,17 +1224,20 @@
       var input = document.getElementById('interviewInput');
       var message = input.value.trim();
       if (!message || !currentCompanyId) return;
-      if (message.length > 10000) { showNotification('El mensaje es demasiado largo (máximo 10.000 caracteres)', 'error'); return; }
+      if (message.length > 10000) { showNotification('El mensaje es demasiado largo (m\u00e1ximo 10.000 caracteres)', 'error'); return; }
 
       var msgs = document.getElementById('interviewMessages');
       msgs.innerHTML += '<div class="chat-message user">' + escapeHtml(message) + '</div>';
       input.value = '';
 
-      // Loading
-      msgs.innerHTML += '<div class="chat-message assistant" id="typingIndicator"><span class="loading-spinner"></span> Pensando...</div>';
+      // Loading con mensaje descriptivo
+      msgs.innerHTML += '<div class="chat-message assistant" id="typingIndicator"><span class="loading-spinner"></span> El agente est\u00e1 analizando tu respuesta...</div>';
       msgs.scrollTop = msgs.scrollHeight;
 
+      // Bloquear input y bot\u00f3n
       document.getElementById('btnSendInterview').disabled = true;
+      input.disabled = true;
+      input.placeholder = 'Esperando respuesta del agente...';
 
       fetch('/api/chat/interview', {
         method: 'POST',
@@ -1019,15 +1253,20 @@
         currentSessionId = data.session_id;
         var typing = document.getElementById('typingIndicator');
         if (typing) typing.remove();
-        msgs.innerHTML += '<div class="chat-message assistant">' + escapeHtml(data.response) + '</div>';
+        msgs.innerHTML += '<div class="chat-message assistant">' + escapeHtml(safeDisplayValue(data.response)) + '</div>';
         msgs.scrollTop = msgs.scrollHeight;
         document.getElementById('btnSendInterview').disabled = false;
+        input.disabled = false;
+        input.placeholder = 'Escribe tu respuesta...';
+        input.focus();
       })
       .catch(function(e) {
         var typing = document.getElementById('typingIndicator');
         if (typing) typing.remove();
-        msgs.innerHTML += '<div class="chat-message system-msg" style="color:var(--danger)">Error: ' + escapeHtml(e.message) + '</div>';
+        msgs.innerHTML += '<div class="chat-message system-msg" style="color:var(--danger)">Error de comunicaci\u00f3n: ' + escapeHtml(safeDisplayValue(e.message)) + '. Verifica que Ollama est\u00e9 corriendo.</div>';
         document.getElementById('btnSendInterview').disabled = false;
+        input.disabled = false;
+        input.placeholder = 'Escribe tu respuesta...';
       });
     }
 
@@ -1044,17 +1283,21 @@
       var btn = document.getElementById('btnGenerateCashflow');
       btn.disabled = true;
       btn.innerHTML = '<span class="loading-spinner"></span> Generando...';
+      showGlobalLoading(
+        'Generando flujo de caja',
+        'La IA est\u00e1 analizando la informaci\u00f3n de tu empresa. Esto puede tomar entre 30 segundos y 2 minutos.'
+      );
 
       fetch('/api/companies/' + currentCompanyId + '/generate-cashflow', {method: 'POST'})
         .then(function(r) { return r.json(); })
         .then(function(data) {
           pollGeneration(data.task_id, function(result) {
+            hideGlobalLoading();
             if (result.status === 'done') {
               btn.innerHTML = '<i class="fa-solid fa-check"></i> Flujo generado';
               btn.disabled = false;
-              showNotification('Flujo de caja generado correctamente', 'success');
+              showNotification('Flujo de caja generado correctamente. Redirigiendo al dashboard...', 'success');
               loadCompanies();
-              // Cargar cashflow
               fetch('/api/companies/' + currentCompanyId + '/cashflow')
                 .then(function(r) { return r.json(); })
                 .then(function(cf) {
@@ -1064,19 +1307,34 @@
             } else {
               btn.innerHTML = '<i class="fa-solid fa-exclamation-triangle"></i> Error';
               btn.disabled = false;
-              showNotification('Error: ' + (result.error || 'Error desconocido'), 'error');
+              showNotification('Error al generar: ' + safeDisplayValue(result.error || 'Error desconocido'), 'error');
             }
           });
         })
         .catch(function(e) {
+          hideGlobalLoading();
           btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Generar Flujo de Caja';
           btn.disabled = false;
-          showNotification('Error: ' + e.message, 'error');
+          showNotification('Error de conexi\u00f3n: ' + safeDisplayValue(e.message), 'error');
         });
     }
 
     function pollGeneration(taskId, callback) {
+      var pollCount = 0;
+      var messages = [
+        'Analizando datos financieros...',
+        'Calculando proyecciones mensuales...',
+        'Identificando patrones de ingresos y gastos...',
+        'Generando alertas y recomendaciones...',
+        'Finalizando el an\u00e1lisis...'
+      ];
       var interval = setInterval(function() {
+        pollCount++;
+        // Actualizar mensaje de progreso en el overlay
+        var msgIdx = Math.min(pollCount - 1, messages.length - 1);
+        var detail = document.getElementById('globalLoadingDetail');
+        if (detail) detail.textContent = messages[msgIdx];
+
         fetch('/api/generation/' + taskId + '/progress')
           .then(function(r) { return r.json(); })
           .then(function(data) {
@@ -1085,7 +1343,7 @@
               callback(data);
             }
           })
-          .catch(function() { clearInterval(interval); callback({status: 'error', error: 'Error de conexión'}); });
+          .catch(function() { clearInterval(interval); callback({status: 'error', error: 'Error de conexi\u00f3n con el servidor'}); });
       }, 3000);
     }
 
@@ -1474,7 +1732,11 @@
     }
 
     function runSimulation(instruction) {
-      document.getElementById('simResultSubtitle').textContent = 'Generando simulación...';
+      document.getElementById('simResultSubtitle').textContent = 'Generando simulaci\u00f3n...';
+      showGlobalLoading(
+        'Simulando escenario',
+        'La IA est\u00e1 calculando el impacto de los cambios en tu flujo de caja...'
+      );
 
       fetch('/api/companies/' + currentCompanyId + '/simulate', {
         method: 'POST',
@@ -1484,23 +1746,25 @@
       .then(function(r) { return r.json(); })
       .then(function(data) {
         pollGeneration(data.task_id, function(result) {
+          hideGlobalLoading();
           if (result.status === 'done' && result.scenario_id) {
             fetch('/api/scenarios/' + result.scenario_id)
               .then(function(r) { return r.json(); })
               .then(function(scenario) {
                 renderSimulationResult(scenario);
                 loadScenarios();
-                showNotification('Simulación completada', 'success');
+                showNotification('Simulaci\u00f3n completada exitosamente', 'success');
               });
           } else {
-            document.getElementById('simResultSubtitle').textContent = 'Error: ' + (result.error || 'Error desconocido');
-            showNotification('Error en simulación', 'error');
+            document.getElementById('simResultSubtitle').textContent = 'Error: ' + safeDisplayValue(result.error || 'Error desconocido');
+            showNotification('Error en simulaci\u00f3n: ' + safeDisplayValue(result.error), 'error');
           }
         });
       })
       .catch(function(e) {
-        document.getElementById('simResultSubtitle').textContent = 'Error: ' + e.message;
-        showNotification('Error: ' + e.message, 'error');
+        hideGlobalLoading();
+        document.getElementById('simResultSubtitle').textContent = 'Error: ' + safeDisplayValue(e.message);
+        showNotification('Error de conexi\u00f3n: ' + safeDisplayValue(e.message), 'error');
       });
     }
 
