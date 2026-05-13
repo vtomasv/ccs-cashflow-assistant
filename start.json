@@ -11,6 +11,26 @@
     {
       "method": "log",
       "params": {
+        "html": "<div style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:8px 20px'><div style='display:flex;align-items:center;gap:8px;padding:8px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:6px'><div style='width:8px;height:8px;border-radius:50%;background:#06b6d4;flex-shrink:0'></div><span style='color:#94a3b8;font-size:12px'>Verificando dependencias Python...</span></div></div>"
+      }
+    },
+    {
+      "method": "shell.run",
+      "params": {
+        "venv": "venv",
+        "message": "python scripts/verify_deps.py"
+      }
+    },
+    {
+      "method": "log",
+      "params": {
+        "html": "<div style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:4px 20px'><div style='display:flex;align-items:center;gap:8px;padding:8px 14px;background:#0f2d1a;border:1px solid #16a34a33;border-radius:6px'><span style='color:#22c55e;font-size:14px'>&#10003;</span><span style='color:#86efac;font-size:12px'>Dependencias verificadas</span></div></div>"
+      }
+    },
+
+    {
+      "method": "log",
+      "params": {
         "html": "<div style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:8px 20px'><div style='display:flex;align-items:center;gap:8px;padding:8px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:6px'><div style='width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0'></div><span style='color:#94a3b8;font-size:12px'>Verificando motor de IA (Ollama)...</span></div></div>"
       }
     },

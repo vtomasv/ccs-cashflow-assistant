@@ -987,38 +987,82 @@ class TestCrossPlatform(unittest.TestCase):
         self.assertIn("platform", content)
         self.assertIn("win32", content)
 
-    def test_install_json_uses_venv_for_pip(self):
-        """Pinokio crea el venv automáticamente cuando se usa 'venv' param.
-        El paso de pip install DEBE tener venv: 'venv' para que las
-        dependencias se instalen dentro del venv y no en el Python global."""
-        data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
-        pip_steps = [
-            step for step in data["run"]
-            if isinstance(step.get("params"), dict)
-            and isinstance(step["params"].get("message"), (str, list))
-            and ("pip install" in str(step["params"]["message"]))
-        ]
-        self.assertTrue(len(pip_steps) > 0, "install.json debe tener al menos un paso de pip install")
-        for step in pip_steps:
-            self.assertEqual(
-                step["params"].get("venv"), "venv",
-                f"Paso de pip install sin venv: {step['params'].get('message')}"
-            )
+    def test_install_json_uses_setup_scripts_for_deps(self):
+        """install.json debe usar scripts dedicados (setup_venv.ps1/sh) para
+        instalar dependencias, en lugar de pip install directo. Esto garantiza
+        que el venv se cree correctamente en Windows con Conda activo."""
+        content = (ROOT / "install.json").read_text(encoding="utf-8")
+        self.assertIn("setup_venv.ps1", content,
+                      "install.json debe usar setup_venv.ps1 para Windows")
+        self.assertIn("setup_venv.sh", content,
+                      "install.json debe usar setup_venv.sh para Unix")
 
-    def test_install_json_no_separate_venv_creation(self):
-        """NO debe haber un paso separado de 'python -m venv venv' porque
-        Pinokio crea el venv automáticamente al usar el param venv: 'venv'.
-        Un paso separado causa problemas en Windows con conda."""
+    def test_setup_scripts_exist(self):
+        """Los scripts de setup deben existir."""
+        self.assertTrue((ROOT / "scripts" / "setup_venv.ps1").exists(),
+                        "scripts/setup_venv.ps1 debe existir")
+        self.assertTrue((ROOT / "scripts" / "setup_venv.sh").exists(),
+                        "scripts/setup_venv.sh debe existir")
+        self.assertTrue((ROOT / "scripts" / "verify_deps.py").exists(),
+                        "scripts/verify_deps.py debe existir")
+
+    def test_setup_ps1_finds_python_robustly(self):
+        """setup_venv.ps1 debe buscar Python en múltiples ubicaciones de Windows."""
+        content = (ROOT / "scripts" / "setup_venv.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Find-Python", content,
+                      "setup_venv.ps1 debe tener función Find-Python")
+        self.assertIn("miniconda3", content,
+                      "setup_venv.ps1 debe buscar en miniconda3")
+        self.assertIn("anaconda3", content,
+                      "setup_venv.ps1 debe buscar en anaconda3")
+        self.assertIn("LOCALAPPDATA", content,
+                      "setup_venv.ps1 debe buscar en LOCALAPPDATA")
+
+    def test_setup_ps1_verifies_critical_imports(self):
+        """setup_venv.ps1 debe verificar que los módulos críticos se importan."""
+        content = (ROOT / "scripts" / "setup_venv.ps1").read_text(encoding="utf-8")
+        # Los imports pueden estar en una sola línea separados por comas
+        for mod in ["requests", "fastapi", "uvicorn", "pydantic"]:
+            self.assertIn(mod, content,
+                          f"setup_venv.ps1 debe verificar {mod}")
+        self.assertIn("VERIFY_OK", content,
+                      "setup_venv.ps1 debe imprimir VERIFY_OK al verificar imports")
+
+    def test_setup_ps1_exits_on_failure(self):
+        """setup_venv.ps1 debe fallar con exit 1 si la verificación falla."""
+        content = (ROOT / "scripts" / "setup_venv.ps1").read_text(encoding="utf-8")
+        self.assertIn("exit 1", content)
+
+    def test_setup_ps1_has_fallback_install(self):
+        """setup_venv.ps1 debe tener un fallback de instalación individual."""
+        content = (ROOT / "scripts" / "setup_venv.ps1").read_text(encoding="utf-8")
+        self.assertIn("force-reinstall", content,
+                      "setup_venv.ps1 debe tener fallback con --force-reinstall")
+
+    def test_setup_sh_verifies_critical_imports(self):
+        """setup_venv.sh debe verificar que los módulos críticos se importan."""
+        content = (ROOT / "scripts" / "setup_venv.sh").read_text(encoding="utf-8")
+        # Los imports pueden estar en una sola línea separados por comas
+        for mod in ["requests", "fastapi", "uvicorn"]:
+            self.assertIn(mod, content,
+                          f"setup_venv.sh debe verificar {mod}")
+        self.assertIn("VERIFY_OK", content,
+                      "setup_venv.sh debe imprimir VERIFY_OK al verificar imports")
+
+    def test_install_json_no_direct_pip_install(self):
+        """install.json NO debe tener pasos directos de 'pip install' porque
+        las dependencias se instalan via scripts dedicados (setup_venv.ps1/sh)
+        que manejan correctamente el venv en Windows con Conda."""
         data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
         for step in data["run"]:
             if isinstance(step.get("params"), dict):
                 msg = step["params"].get("message", "")
                 if isinstance(msg, list):
                     msg = " ".join(msg)
-                # Si hay un paso que SOLO crea el venv sin venv param, es un error
-                if "python -m venv venv" in msg and step["params"].get("venv") is None:
-                    self.fail("install.json tiene un paso separado de 'python -m venv venv' sin venv param. "
-                              "Pinokio debe crear el venv automáticamente via el param venv.")
+                # No debe haber pip install directo en install.json
+                if "pip install" in msg and step["params"].get("venv") == "venv":
+                    self.fail("install.json tiene pip install directo con venv param. "
+                              "Debe usar scripts/setup_venv.ps1 o .sh en su lugar.")
 
     def test_install_json_data_init_uses_venv(self):
         """Los pasos de inicialización de datos que usan python deben
@@ -1051,6 +1095,41 @@ class TestCrossPlatform(unittest.TestCase):
     def test_start_json_sets_encoding_env(self):
         content = (ROOT / "start.json").read_text(encoding="utf-8")
         self.assertTrue("PYTHONIOENCODING" in content or "PYTHONUTF8" in content)
+
+    def test_start_json_verifies_deps_before_server(self):
+        """start.json debe ejecutar verify_deps.py ANTES de server/app.py."""
+        content = (ROOT / "start.json").read_text(encoding="utf-8")
+        self.assertIn("verify_deps.py", content,
+                      "start.json debe ejecutar verify_deps.py")
+        verify_pos = content.index("verify_deps.py")
+        server_pos = content.index("server/app.py")
+        self.assertLess(verify_pos, server_pos,
+                        "verify_deps.py debe ejecutarse ANTES de server/app.py")
+
+    def test_start_json_shows_dep_verification_message(self):
+        """start.json debe mostrar un mensaje de verificación de dependencias."""
+        content = (ROOT / "start.json").read_text(encoding="utf-8")
+        self.assertIn("Verificando dependencias", content)
+
+    def test_verify_deps_auto_repairs(self):
+        """verify_deps.py debe intentar auto-reparar dependencias faltantes."""
+        content = (ROOT / "scripts" / "verify_deps.py").read_text(encoding="utf-8")
+        # verify_deps.py usa subprocess con lista de args, no cadena literal
+        self.assertIn("pip", content, "verify_deps.py debe usar pip para instalar")
+        self.assertIn("Instalando automaticamente", content)
+        self.assertIn("DEPS_VERIFY_OK", content)
+
+    def test_verify_deps_checks_all_critical_modules(self):
+        """verify_deps.py debe verificar todos los módulos críticos."""
+        content = (ROOT / "scripts" / "verify_deps.py").read_text(encoding="utf-8")
+        for mod in ["requests", "fastapi", "uvicorn", "pydantic", "aiofiles", "openpyxl"]:
+            self.assertIn(mod, content,
+                          f"verify_deps.py debe verificar {mod}")
+
+    def test_diagnose_scripts_exist(self):
+        """Scripts de diagnóstico deben existir para ambas plataformas."""
+        self.assertTrue((ROOT / "scripts" / "diagnose.ps1").exists())
+        self.assertTrue((ROOT / "scripts" / "diagnose.sh").exists())
 
     def test_install_json_ollama_windows(self):
         """Windows debe usar OllamaSetup.exe descargado con curl, no winget

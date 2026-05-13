@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# CCS Cashflow Assistant - Test de Validación macOS/Linux
+# CCS Cashflow Assistant - Test de Validacion macOS/Linux
 # ============================================================
 # Ejecutar con: bash tests/test_mac.sh
 # ============================================================
@@ -36,20 +36,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 
 if [ ! -f "$ROOT/pinokio.js" ]; then
-    echo "Error: No se encontró pinokio.js en $ROOT"
+    echo "Error: No se encontro pinokio.js en $ROOT"
     exit 1
 fi
 
 echo ""
 echo -e "${CYAN}============================================================${NC}"
-echo -e "${CYAN} CCS Cashflow Assistant - Validación macOS/Linux${NC}"
+echo -e "${CYAN} CCS Cashflow Assistant - Validacion macOS/Linux${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
 
 # ============================================================
 # 1. ESTRUCTURA DE ARCHIVOS
 # ============================================================
-echo -e "${YELLOW}[1/7] Estructura de archivos${NC}"
+echo -e "${YELLOW}[1/10] Estructura de archivos${NC}"
 
 check "pinokio.js existe" "$([ -f "$ROOT/pinokio.js" ] && echo true || echo false)"
 check "install.json existe" "$([ -f "$ROOT/install.json" ] && echo true || echo false)"
@@ -65,82 +65,150 @@ check "defaults/prompts/ existe" "$([ -d "$ROOT/defaults/prompts" ] && echo true
 check "app/lib/purify.min.js existe" "$([ -f "$ROOT/app/lib/purify.min.js" ] && echo true || echo false)"
 
 # ============================================================
-# 2. JSON VÁLIDOS
+# 2. SCRIPTS DE SETUP (CRITICO PARA WINDOWS)
 # ============================================================
 echo ""
-echo -e "${YELLOW}[2/7] Validación JSON${NC}"
+echo -e "${YELLOW}[2/10] Scripts de setup (prevencion ModuleNotFoundError)${NC}"
+
+check "scripts/setup_venv.ps1 existe" "$([ -f "$ROOT/scripts/setup_venv.ps1" ] && echo true || echo false)"
+check "scripts/setup_venv.sh existe" "$([ -f "$ROOT/scripts/setup_venv.sh" ] && echo true || echo false)"
+check "scripts/verify_deps.py existe" "$([ -f "$ROOT/scripts/verify_deps.py" ] && echo true || echo false)"
+check "scripts/diagnose.ps1 existe" "$([ -f "$ROOT/scripts/diagnose.ps1" ] && echo true || echo false)"
+check "scripts/diagnose.sh existe" "$([ -f "$ROOT/scripts/diagnose.sh" ] && echo true || echo false)"
+check "setup_venv.sh es ejecutable" "$([ -x "$ROOT/scripts/setup_venv.sh" ] && echo true || echo false)"
+check "diagnose.sh es ejecutable" "$([ -x "$ROOT/scripts/diagnose.sh" ] && echo true || echo false)"
+
+SETUP_PS1=$(cat "$ROOT/scripts/setup_venv.ps1")
+SETUP_SH=$(cat "$ROOT/scripts/setup_venv.sh")
+VERIFY_DEPS=$(cat "$ROOT/scripts/verify_deps.py")
+
+check "setup_venv.ps1 busca Python en PATH" "$(echo "$SETUP_PS1" | grep -q 'Get-Command python' && echo true || echo false)"
+check "setup_venv.ps1 busca Python en rutas comunes Windows" "$(echo "$SETUP_PS1" | grep -q 'miniconda3' && echo true || echo false)"
+check "setup_venv.ps1 crea venv con python -m venv" "$(echo "$SETUP_PS1" | grep -q 'venv' && echo true || echo false)"
+check "setup_venv.ps1 usa venv Scripts python.exe para pip" "$(echo "$SETUP_PS1" | grep -q 'venvPython.*-m pip' && echo true || echo false)"
+check "setup_venv.ps1 instala desde requirements.txt" "$(echo "$SETUP_PS1" | grep -q 'requirements.txt' && echo true || echo false)"
+check "setup_venv.ps1 tiene fallback individual" "$(echo "$SETUP_PS1" | grep -q 'force-reinstall' && echo true || echo false)"
+check "setup_venv.ps1 verifica import requests" "$(echo "$SETUP_PS1" | grep -q 'import requests' && echo true || echo false)"
+check "setup_venv.ps1 verifica fastapi en imports" "$(echo "$SETUP_PS1" | grep -q 'fastapi' && echo true || echo false)"
+check "setup_venv.ps1 verifica uvicorn en imports" "$(echo "$SETUP_PS1" | grep -q 'uvicorn' && echo true || echo false)"
+check "setup_venv.ps1 falla con exit 1 si verificacion falla" "$(echo "$SETUP_PS1" | grep -q 'exit 1' && echo true || echo false)"
+check "setup_venv.ps1 imprime VERIFY_OK" "$(echo "$SETUP_PS1" | grep -q 'VERIFY_OK' && echo true || echo false)"
+check "setup_venv.ps1 imprime DEPS_OK" "$(echo "$SETUP_PS1" | grep -q 'DEPS_OK' && echo true || echo false)"
+
+check "setup_venv.sh crea venv" "$(echo "$SETUP_SH" | grep -q 'python3 -m venv' && echo true || echo false)"
+check "setup_venv.sh instala desde requirements.txt" "$(echo "$SETUP_SH" | grep -q 'requirements.txt' && echo true || echo false)"
+check "setup_venv.sh verifica import requests" "$(echo "$SETUP_SH" | grep -q 'import requests' && echo true || echo false)"
+check "setup_venv.sh imprime VERIFY_OK" "$(echo "$SETUP_SH" | grep -q 'VERIFY_OK' && echo true || echo false)"
+check "setup_venv.sh imprime DEPS_OK" "$(echo "$SETUP_SH" | grep -q 'DEPS_OK' && echo true || echo false)"
+
+check "verify_deps.py verifica requests" "$(echo "$VERIFY_DEPS" | grep -q 'requests' && echo true || echo false)"
+check "verify_deps.py verifica fastapi" "$(echo "$VERIFY_DEPS" | grep -q 'fastapi' && echo true || echo false)"
+check "verify_deps.py intenta auto-reparar" "$(echo "$VERIFY_DEPS" | grep -q 'pip.*install' && echo true || echo false)"
+check "verify_deps.py imprime DEPS_VERIFY_OK" "$(echo "$VERIFY_DEPS" | grep -q 'DEPS_VERIFY_OK' && echo true || echo false)"
+
+# ============================================================
+# 3. JSON VALIDOS
+# ============================================================
+echo ""
+echo -e "${YELLOW}[3/10] Validacion JSON${NC}"
 
 for f in install.json start.json stop.json reset.json defaults/agents.json; do
     if python3 -c "import json; json.loads(open('$ROOT/$f', encoding='utf-8').read())" 2>/dev/null; then
-        check "$f es JSON válido" "true"
+        check "$f es JSON valido" "true"
     else
-        check "$f es JSON válido" "false"
+        check "$f es JSON valido" "false"
     fi
 done
 
 # ============================================================
-# 3. CROSS-PLATFORM EN INSTALL.JSON
+# 4. INSTALL.JSON CROSS-PLATFORM
 # ============================================================
 echo ""
-echo -e "${YELLOW}[3/7] Cross-platform install.json${NC}"
+echo -e "${YELLOW}[4/10] Cross-platform install.json${NC}"
 
 INSTALL=$(cat "$ROOT/install.json")
 
-check "install.json tiene condición win32" "$(echo "$INSTALL" | grep -q 'win32' && echo true || echo false)"
+check "install.json tiene condicion win32" "$(echo "$INSTALL" | grep -q 'win32' && echo true || echo false)"
 check "install.json tiene OllamaSetup.exe para Windows" "$(echo "$INSTALL" | grep -q 'OllamaSetup.exe' && echo true || echo false)"
-check "install.json usa venv param para pip install" "$(echo "$INSTALL" | grep -q '"venv"' && echo true || echo false)"
+check "install.json usa setup_venv.ps1 para Windows" "$(echo "$INSTALL" | grep -q 'setup_venv.ps1' && echo true || echo false)"
+check "install.json usa setup_venv.sh para Unix" "$(echo "$INSTALL" | grep -q 'setup_venv.sh' && echo true || echo false)"
 check "install.json no tiene background: true" "$(echo "$INSTALL" | grep -qv '"background"' && echo true || echo false)"
 check "install.json muestra progreso visual" "$(echo "$INSTALL" | grep -q 'border-radius' && echo true || echo false)"
-check "install.json no crea venv manualmente" "$(echo "$INSTALL" | grep -v '"venv"' | grep -qv 'python -m venv' && echo true || echo false)"
+check "install.json tiene paso de verificacion Ollama" "$(echo "$INSTALL" | grep -q 'Verificando Ollama' && echo true || echo false)"
+check "install.json tiene paso de descarga de modelo" "$(echo "$INSTALL" | grep -q 'Descargando modelo' && echo true || echo false)"
+check "install.json tiene paso de dependencias Python" "$(echo "$INSTALL" | grep -q 'Instalando dependencias Python' && echo true || echo false)"
+check "install.json tiene paso de inicializacion datos" "$(echo "$INSTALL" | grep -q 'Inicializando datos' && echo true || echo false)"
+check "install.json tiene notificacion de completado" "$(echo "$INSTALL" | grep -q 'notify' && echo true || echo false)"
 
 # ============================================================
-# 4. CROSS-PLATFORM EN START.JSON
+# 5. START.JSON CROSS-PLATFORM + VERIFICACION DEPS
 # ============================================================
 echo ""
-echo -e "${YELLOW}[4/7] Cross-platform start.json${NC}"
+echo -e "${YELLOW}[5/10] Cross-platform start.json + verificacion pre-arranque${NC}"
 
 START=$(cat "$ROOT/start.json")
 
 check "start.json tiene daemon: true" "$(echo "$START" | grep -q '"daemon".*true' && echo true || echo false)"
-check "start.json tiene condición win32" "$(echo "$START" | grep -q 'win32' && echo true || echo false)"
+check "start.json tiene condicion win32" "$(echo "$START" | grep -q 'win32' && echo true || echo false)"
+check "start.json verifica dependencias ANTES de arrancar" "$(echo "$START" | grep -q 'verify_deps.py' && echo true || echo false)"
+check "start.json muestra mensaje de verificacion de deps" "$(echo "$START" | grep -q 'Verificando dependencias' && echo true || echo false)"
 check "start.json usa 'start /B ollama serve' para Windows" "$(echo "$START" | grep -q 'start /B ollama serve' && echo true || echo false)"
 check "start.json usa venv para servidor" "$(echo "$START" | grep -q '"venv"' && echo true || echo false)"
 check "start.json tiene PYTHONIOENCODING" "$(echo "$START" | grep -q 'PYTHONIOENCODING' && echo true || echo false)"
+check "start.json tiene PYTHONUTF8" "$(echo "$START" | grep -q 'PYTHONUTF8' && echo true || echo false)"
 check "start.json muestra mensajes de estado" "$(echo "$START" | grep -q 'Verificando motor de IA' && echo true || echo false)"
 check "start.json abre browser al final" "$(echo "$START" | grep -q 'browser.open' && echo true || echo false)"
-check "start.json no usa powershell para Ollama" "$(echo "$START" | grep -v 'powershell' | grep -q 'ollama' && echo true || echo false)"
-check "start.json captura URL con regex" "$(echo "$START" | grep -q 'event.*http' && echo true || echo false)"
+check "start.json usa local.set para URL" "$(echo "$START" | grep -q 'local.set' && echo true || echo false)"
+check "start.json usa local.url en browser.open" "$(echo "$START" | grep -q 'local.url' && echo true || echo false)"
 
 # ============================================================
-# 5. CROSS-PLATFORM EN STOP.JSON
+# 6. STOP.JSON CROSS-PLATFORM
 # ============================================================
 echo ""
-echo -e "${YELLOW}[5/7] Cross-platform stop.json${NC}"
+echo -e "${YELLOW}[6/10] Cross-platform stop.json${NC}"
 
 STOP=$(cat "$ROOT/stop.json")
 
-check "stop.json tiene condición win32" "$(echo "$STOP" | grep -q 'win32' && echo true || echo false)"
+check "stop.json tiene condicion win32" "$(echo "$STOP" | grep -q 'win32' && echo true || echo false)"
 check "stop.json usa pkill para unix" "$(echo "$STOP" | grep -q 'pkill' && echo true || echo false)"
 check "stop.json usa wmic para Windows" "$(echo "$STOP" | grep -q 'wmic' && echo true || echo false)"
-check "stop.json muestra mensaje de detención" "$(echo "$STOP" | grep -q 'Deteniendo\|detenida' && echo true || echo false)"
+check "stop.json NO usa script.stop" "$(echo "$STOP" | grep -qv 'script.stop' && echo true || echo false)"
+check "stop.json muestra mensaje de detencion" "$(echo "$STOP" | grep -q 'Deteniendo\|detenida\|detenido' && echo true || echo false)"
 
 # ============================================================
-# 6. FRONTEND UX
+# 7. REQUIREMENTS.TXT COMPLETITUD
 # ============================================================
 echo ""
-echo -e "${YELLOW}[6/7] Frontend UX${NC}"
+echo -e "${YELLOW}[7/10] Requirements.txt completitud${NC}"
+
+REQ=$(cat "$ROOT/requirements.txt")
+
+check "requirements.txt contiene fastapi" "$(echo "$REQ" | grep -q 'fastapi' && echo true || echo false)"
+check "requirements.txt contiene uvicorn" "$(echo "$REQ" | grep -q 'uvicorn' && echo true || echo false)"
+check "requirements.txt contiene requests" "$(echo "$REQ" | grep -q 'requests' && echo true || echo false)"
+check "requirements.txt contiene pydantic" "$(echo "$REQ" | grep -q 'pydantic' && echo true || echo false)"
+check "requirements.txt contiene aiofiles" "$(echo "$REQ" | grep -q 'aiofiles' && echo true || echo false)"
+check "requirements.txt contiene openpyxl" "$(echo "$REQ" | grep -q 'openpyxl' && echo true || echo false)"
+check "requirements.txt contiene httpx" "$(echo "$REQ" | grep -q 'httpx' && echo true || echo false)"
+check "requirements.txt contiene python-multipart" "$(echo "$REQ" | grep -q 'python-multipart' && echo true || echo false)"
+
+# ============================================================
+# 8. FRONTEND UX
+# ============================================================
+echo ""
+echo -e "${YELLOW}[8/10] Frontend UX${NC}"
 
 HTML=$(cat "$ROOT/app/index.html")
 
 check "Frontend tiene readiness-banner" "$(echo "$HTML" | grep -q 'readiness-banner' && echo true || echo false)"
 check "Frontend tiene globalLoadingOverlay" "$(echo "$HTML" | grep -q 'globalLoadingOverlay' && echo true || echo false)"
-check "Frontend tiene función showGlobalLoading" "$(echo "$HTML" | grep -q 'function showGlobalLoading' && echo true || echo false)"
-check "Frontend tiene función hideGlobalLoading" "$(echo "$HTML" | grep -q 'function hideGlobalLoading' && echo true || echo false)"
-check "Frontend tiene función checkReadiness" "$(echo "$HTML" | grep -q 'function checkReadiness' && echo true || echo false)"
-check "Frontend tiene función safeDisplayValue" "$(echo "$HTML" | grep -q 'function safeDisplayValue' && echo true || echo false)"
-check "Frontend tiene función loadModelPerformance" "$(echo "$HTML" | grep -q 'function loadModelPerformance' && echo true || echo false)"
+check "Frontend tiene funcion showGlobalLoading" "$(echo "$HTML" | grep -q 'function showGlobalLoading' && echo true || echo false)"
+check "Frontend tiene funcion hideGlobalLoading" "$(echo "$HTML" | grep -q 'function hideGlobalLoading' && echo true || echo false)"
+check "Frontend tiene funcion checkReadiness" "$(echo "$HTML" | grep -q 'function checkReadiness' && echo true || echo false)"
+check "Frontend tiene funcion safeDisplayValue" "$(echo "$HTML" | grep -q 'function safeDisplayValue' && echo true || echo false)"
+check "Frontend tiene funcion loadModelPerformance" "$(echo "$HTML" | grep -q 'function loadModelPerformance' && echo true || echo false)"
 check "Frontend tiene modelPerfContainer" "$(echo "$HTML" | grep -q 'modelPerfContainer' && echo true || echo false)"
-check "Frontend desactiva botones durante generación" "$(echo "$HTML" | grep -q '\.disabled = true' && echo true || echo false)"
+check "Frontend desactiva botones durante generacion" "$(echo "$HTML" | grep -q '\.disabled = true' && echo true || echo false)"
 check "Frontend desactiva input durante chat" "$(echo "$HTML" | grep -q 'input.disabled = true' && echo true || echo false)"
 check "Frontend tiene mensajes amigables de carga" "$(echo "$HTML" | grep -q 'analizando\|Generando' && echo true || echo false)"
 check "Frontend usa DOMPurify" "$(echo "$HTML" | grep -q 'purify.min.js' && echo true || echo false)"
@@ -149,10 +217,10 @@ check "Frontend no usa eval()" "$(echo "$HTML" | grep -v 'font-display' | grep -
 check "Frontend tiene polling con setInterval" "$(echo "$HTML" | grep -q 'setInterval' && echo true || echo false)"
 
 # ============================================================
-# 7. SEGURIDAD
+# 9. SEGURIDAD
 # ============================================================
 echo ""
-echo -e "${YELLOW}[7/7] Seguridad${NC}"
+echo -e "${YELLOW}[9/10] Seguridad${NC}"
 
 SERVER=$(cat "$ROOT/server/app.py")
 
@@ -165,7 +233,24 @@ check "Backend tiene ensure_ascii=False" "$(echo "$SERVER" | grep -q 'ensure_asc
 check "Backend tiene endpoint /api/readiness" "$(echo "$SERVER" | grep -q '/api/readiness' && echo true || echo false)"
 check "Backend tiene endpoint /api/hardware/performance" "$(echo "$SERVER" | grep -q '/api/hardware/performance' && echo true || echo false)"
 check "Backend tiene endpoint /api/ollama/status" "$(echo "$SERVER" | grep -q '/api/ollama/status' && echo true || echo false)"
-check "Backend imprime 127.0.0.1 (no 0.0.0.0)" "$(echo "$SERVER" | grep -q 'print(f\"http://127.0.0.1' && echo true || echo false)"
+
+# ============================================================
+# 10. CONSISTENCIA CON BRAND-ASSISTANT
+# ============================================================
+echo ""
+echo -e "${YELLOW}[10/10] Consistencia con brand-assistant${NC}"
+
+check "install.json usa scripts dedicados (no pip directo)" "$(echo "$INSTALL" | grep -q 'setup_venv' && echo true || echo false)"
+check "start.json verifica deps antes de arrancar servidor" "$(
+    VERIFY_POS=$(echo "$START" | grep -n 'verify_deps' | head -1 | cut -d: -f1)
+    SERVER_POS=$(echo "$START" | grep -n 'server/app.py' | head -1 | cut -d: -f1)
+    [ -n "$VERIFY_POS" ] && [ -n "$SERVER_POS" ] && [ "$VERIFY_POS" -lt "$SERVER_POS" ] && echo true || echo false
+)"
+check "setup_venv.ps1 tiene Find-Python" "$(echo "$SETUP_PS1" | grep -q 'function Find-Python' && echo true || echo false)"
+check "setup_venv.ps1 tiene ErrorActionPreference Stop" "$(echo "$SETUP_PS1" | grep -q 'ErrorActionPreference.*Stop' && echo true || echo false)"
+check "Ambos scripts de setup tienen VERIFY_OK" "$(echo "$SETUP_PS1" | grep -q 'VERIFY_OK' && echo "$SETUP_SH" | grep -q 'VERIFY_OK' && echo true || echo false)"
+check "Diagnose script existe para Windows" "$([ -f "$ROOT/scripts/diagnose.ps1" ] && echo true || echo false)"
+check "Diagnose script existe para Mac/Linux" "$([ -f "$ROOT/scripts/diagnose.sh" ] && echo true || echo false)"
 
 # ============================================================
 # RESUMEN
