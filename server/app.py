@@ -420,7 +420,14 @@ class CompanyCreate(BaseModel):
 class ChatMessage(BaseModel):
     company_id: str
     message: str
-    session_id: str = ""
+    session_id: Optional[str] = ""
+
+    @validator("session_id", pre=True, always=True)
+    def coerce_session_id(cls, v):
+        """Aceptar null/None del frontend y convertir a string vacío."""
+        if v is None:
+            return ""
+        return str(v)
 
     @validator("message")
     def validate_message(cls, v):
@@ -442,9 +449,9 @@ class ScenarioRequest(BaseModel):
         return v.strip()
 
 class AgentConfigUpdate(BaseModel):
-    model: str = None
-    temperature: float = None
-    system_prompt: str = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    system_prompt: Optional[str] = None
 
     @validator("temperature")
     def validate_temperature(cls, v):
@@ -459,10 +466,10 @@ class AgentConfigUpdate(BaseModel):
         return v
 
 class MonthData(BaseModel):
-    month: str = None
-    label: str = None
-    income: dict = None
-    expenses: dict = None
+    month: Optional[str] = None
+    label: Optional[str] = None
+    income: Optional[dict] = None
+    expenses: Optional[dict] = None
 
 # ---------------------------------------------------------------------------
 # Normalización de datos de flujo de caja
@@ -1601,6 +1608,21 @@ async def list_sessions(company_id: str):
         })
     return {"sessions": sessions}
 
+@app.get("/api/companies/{company_id}/sessions/{session_id}")
+async def get_session(company_id: str, session_id: str):
+    company_id = _sanitize_id(company_id)
+    session_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64]
+    session_path = DATA_DIR / "sessions" / f"{company_id}_{session_id}.json"
+    if not session_path.exists():
+        raise HTTPException(404, "Sesión no encontrada")
+    session = load_json(session_path)
+    return {
+        "id": session.get("id"),
+        "type": session.get("type", "interview"),
+        "messages": session.get("messages", []),
+        "created_at": session.get("created_at")
+    }
+
 # ---------------------------------------------------------------------------
 # Montar archivos estáticos y arrancar
 # ---------------------------------------------------------------------------
@@ -1637,5 +1659,17 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"http://127.0.0.1:{PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+
+    # En Windows, asyncio necesita ProactorEventLoop para sockets y subprocesos.
+    # Esto evita el error 'NotImplementedError' al usar asyncio en Windows.
+    if sys.platform == "win32":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    # Siempre escuchar en 127.0.0.1 para que la URL emitida por uvicorn
+    # coincida exactamente con lo que Pinokio captura via el evento on/regex
+    # y luego usa en browser.open. Usar 0.0.0.0 causa que Pinokio capture
+    # "http://0.0.0.0:PORT" que no es accesible en Windows.
+    host = "127.0.0.1"
+    print(f"http://{host}:{PORT}")
+    uvicorn.run(app, host=host, port=PORT, log_level="info")

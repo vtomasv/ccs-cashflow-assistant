@@ -1174,25 +1174,35 @@
     function loadInterviewSession() {
       var msgs = document.getElementById('interviewMessages');
       msgs.innerHTML = '<div class="chat-message system-msg">Iniciando entrevista financiera. El agente te har&aacute; preguntas sobre tu empresa para construir el flujo de caja.</div>';
-      // Cargar sesiones previas
+
+      // Cargar sesiones previas y decidir si iniciar auto-entrevista
+      // Un solo fetch para evitar race conditions
       fetch('/api/companies/' + currentCompanyId + '/sessions')
         .then(function(r) { return r.json(); })
         .then(function(data) {
           var sessions = (data.sessions || []).filter(function(s) { return s.type !== 'simulation'; });
           if (sessions.length > 0) {
             currentSessionId = sessions[sessions.length - 1].id;
-            // Cargar mensajes de la sesión
-            return fetch('/api/companies/' + currentCompanyId + '/sessions');
+            // Cargar mensajes previos de la sesión
+            return fetch('/api/companies/' + currentCompanyId + '/sessions/' + currentSessionId)
+              .then(function(r) { return r.json(); })
+              .then(function(sessionData) {
+                var messages = sessionData.messages || [];
+                messages.forEach(function(m) {
+                  msgs.innerHTML += '<div class="chat-message ' + m.role + '">' + escapeHtml(safeDisplayValue(m.content)) + '</div>';
+                });
+                msgs.scrollTop = msgs.scrollHeight;
+              })
+              .catch(function() {});
+          } else {
+            // Primera vez: enviar mensaje inicial automático
+            sendAutoInterviewStart();
           }
         })
-        .catch(function() {});
-
-      // Enviar mensaje inicial automático si es primera vez
-      if (!currentSessionId) {
-        setTimeout(function() {
+        .catch(function() {
+          // Si falla el fetch de sesiones, intentar auto-start
           sendAutoInterviewStart();
-        }, 500);
-      }
+        });
     }
 
     function sendAutoInterviewStart() {
@@ -1203,7 +1213,7 @@
         body: JSON.stringify({
           company_id: currentCompanyId,
           message: 'Hola, quiero crear un flujo de caja para mi empresa. ¿Por dónde empezamos?',
-          session_id: currentSessionId
+          session_id: currentSessionId || ''
         })
       })
       .then(function(r) { return r.json(); })
@@ -1245,7 +1255,7 @@
         body: JSON.stringify({
           company_id: currentCompanyId,
           message: message,
-          session_id: currentSessionId
+          session_id: currentSessionId || ''
         })
       })
       .then(function(r) { return r.json(); })

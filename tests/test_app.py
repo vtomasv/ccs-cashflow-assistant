@@ -484,6 +484,58 @@ class TestChatValidation(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 404)
 
+    @patch("app.call_ollama_chat", return_value="Respuesta de prueba")
+    def test_chat_with_null_session_id(self, mock_chat):
+        """El frontend envía session_id: null cuando currentSessionId es null.
+        El backend debe aceptarlo sin devolver 422.
+        Bug real en Windows: POST /api/chat/interview -> 422."""
+        c = client.post("/api/companies", json={"name": "Null Session Test"}).json()
+        response = client.post("/api/chat/interview", json={
+            "company_id": c["id"],
+            "message": "Hola, quiero crear un flujo de caja",
+            "session_id": None
+        })
+        self.assertEqual(response.status_code, 200,
+                         f"session_id=null debe ser aceptado, no 422. Response: {response.text}")
+        self.assertIn("response", response.json())
+        self.assertIn("session_id", response.json())
+
+    @patch("app.call_ollama_chat", return_value="Respuesta de prueba")
+    def test_chat_with_empty_session_id(self, mock_chat):
+        """session_id vacío debe funcionar (primera entrevista)."""
+        c = client.post("/api/companies", json={"name": "Empty Session Test"}).json()
+        response = client.post("/api/chat/interview", json={
+            "company_id": c["id"],
+            "message": "Hola",
+            "session_id": ""
+        })
+        self.assertEqual(response.status_code, 200)
+
+    @patch("app.call_ollama_chat", return_value="Respuesta de prueba")
+    def test_chat_without_session_id_field(self, mock_chat):
+        """Omitir session_id del JSON debe funcionar (usa default '')."""
+        c = client.post("/api/companies", json={"name": "No Session Test"}).json()
+        response = client.post("/api/chat/interview", json={
+            "company_id": c["id"],
+            "message": "Hola"
+        })
+        self.assertEqual(response.status_code, 200)
+
+    def test_chat_model_accepts_null_session_id(self):
+        """ChatMessage Pydantic model debe aceptar session_id=None."""
+        from app import ChatMessage
+        msg = ChatMessage(company_id="test", message="Hola", session_id=None)
+        self.assertEqual(msg.session_id, "")
+
+    def test_frontend_sends_empty_string_not_null(self):
+        """El frontend debe enviar session_id como '' (no null) para evitar
+        problemas con Pydantic. Verificar que usa || '' en el JSON."""
+        content = (ROOT / "app" / "index.html").read_text(encoding="utf-8")
+        # Debe usar currentSessionId || '' en los fetch de chat/interview
+        self.assertIn("currentSessionId || ''", content,
+                      "Frontend debe enviar session_id: currentSessionId || '' "
+                      "para evitar enviar null a Pydantic")
+
 
 # =====================================================================
 # AGENTES
@@ -1164,7 +1216,31 @@ class TestCrossPlatform(unittest.TestCase):
         """El servidor debe imprimir http://127.0.0.1:PORT (no 0.0.0.0)
         para que el regex de start.json capture una URL válida en Windows."""
         content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
-        self.assertIn('print(f"http://127.0.0.1:{PORT}")', content)
+        # Puede ser print(f"http://127.0.0.1:{PORT}") o print(f"http://{host}:{PORT}")
+        # Lo importante es que NO tenga 0.0.0.0 en el print
+        self.assertNotIn('print(f"http://0.0.0.0', content,
+                         "El print NO debe usar 0.0.0.0 - Pinokio captura esa URL")
+
+    def test_uvicorn_binds_to_127(self):
+        """uvicorn.run debe usar host='127.0.0.1' (no '0.0.0.0').
+        En Windows, 0.0.0.0 causa que Pinokio capture una URL no accesible.
+        Patron del brand-assistant: siempre 127.0.0.1."""
+        content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn('host="0.0.0.0"', content,
+                         "uvicorn NO debe usar host='0.0.0.0'. "
+                         "Usar '127.0.0.1' para que Pinokio capture la URL correcta.")
+        self.assertNotIn("host='0.0.0.0'", content,
+                         "uvicorn NO debe usar host='0.0.0.0'.")
+        # Debe tener host = "127.0.0.1"
+        self.assertIn('host = "127.0.0.1"', content,
+                      "uvicorn debe usar host='127.0.0.1'")
+
+    def test_windows_asyncio_policy(self):
+        """En Windows, debe configurar WindowsProactorEventLoopPolicy
+        para evitar NotImplementedError con asyncio."""
+        content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("WindowsProactorEventLoopPolicy", content,
+                      "Debe configurar WindowsProactorEventLoopPolicy para Windows")
 
     def test_install_json_no_powershell_for_ollama_serve(self):
         """En install.json, el inicio de Ollama en Windows no debe usar

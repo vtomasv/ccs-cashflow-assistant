@@ -464,6 +464,35 @@ Test-Check "app.py NO usa DATA_DIR = Path(os.environ.get directo" {
     -not ($serverContent -match 'DATA_DIR = Path\(os\.environ\.get')
 }
 
+# --- Proteccion contra URL 0.0.0.0 (Pinokio no puede abrir) ---
+Test-Check "app.py NO usa host=0.0.0.0 en uvicorn" {
+    -not ($serverContent -match 'host=["'']0\.0\.0\.0["'']')
+}
+Test-Check "app.py usa host = 127.0.0.1" {
+    $serverContent -match 'host = "127\.0\.0\.1"'
+}
+Test-Check "app.py tiene WindowsProactorEventLoopPolicy" {
+    $serverContent -match 'WindowsProactorEventLoopPolicy'
+}
+Test-Check "app.py NO imprime http://0.0.0.0" {
+    -not ($serverContent -match 'print.*http://0\.0\.0\.0')
+}
+
+# --- Proteccion contra 422 en chat/interview con session_id null ---
+Test-Check "ChatMessage usa Optional[str] para session_id" {
+    $serverContent -match 'Optional\[str\]'
+}
+Test-Check "ChatMessage tiene coerce_session_id validator" {
+    $serverContent -match 'coerce_session_id'
+}
+$htmlContent = Get-Content "$ROOT/app/index.html" -Raw -Encoding UTF8
+Test-Check "Frontend usa currentSessionId || vacio" {
+    $htmlContent -match "currentSessionId \|\| ''"
+}
+Test-Check "Backend tiene endpoint GET sessions/session_id" {
+    $serverContent -match 'sessions/\{session_id\}'
+}
+
 # ============================================================
 # RESUMEN
 # ============================================================

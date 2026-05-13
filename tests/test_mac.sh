@@ -291,6 +291,19 @@ check "app.py tiene guardia contra plantillas Pinokio en DATA_DIR" "$(echo "$SER
 check "app.py usa BASE_DIR / data como fallback" "$(echo "$SERVER" | grep -q 'BASE_DIR.*data' && echo true || echo false)"
 check "app.py NO usa DATA_DIR = Path(os.environ.get directo" "$(echo "$SERVER" | grep -qv 'DATA_DIR = Path(os.environ.get' && echo true || echo false)"
 
+# --- Proteccion contra URL 0.0.0.0 (Pinokio no puede abrir) ---
+check "app.py NO usa host=0.0.0.0 en uvicorn" "$(echo "$SERVER" | grep -qv 'host=.0.0.0.0.' && echo true || echo false)"
+check "app.py usa host = 127.0.0.1" "$(echo "$SERVER" | grep -q 'host = .127.0.0.1.' && echo true || echo false)"
+check "app.py tiene WindowsProactorEventLoopPolicy" "$(echo "$SERVER" | grep -q 'WindowsProactorEventLoopPolicy' && echo true || echo false)"
+check "app.py NO imprime http://0.0.0.0" "$(echo "$SERVER" | grep -qv 'print.*http://0.0.0.0' && echo true || echo false)"
+
+# --- Proteccion contra 422 en chat/interview con session_id null ---
+check "ChatMessage usa Optional[str] para session_id" "$(echo "$SERVER" | grep -q 'Optional.str.' && echo true || echo false)"
+check "ChatMessage tiene coerce_session_id validator" "$(echo "$SERVER" | grep -q 'coerce_session_id' && echo true || echo false)"
+check "Frontend usa currentSessionId || vacio" "$(grep -q "currentSessionId || ''" "$ROOT/app/index.html" && echo true || echo false)"
+check "Frontend NO tiene race condition en loadInterviewSession" "$(grep -c 'fetch.*sessions' "$ROOT/app/index.html" | python3 -c "import sys; n=int(sys.stdin.read().strip()); print('true' if n <= 4 else 'false')")"
+check "Backend tiene endpoint GET sessions/session_id" "$(echo "$SERVER" | grep -q 'sessions/{session_id}' && echo true || echo false)"
+
 # ============================================================
 # RESUMEN
 # ============================================================
