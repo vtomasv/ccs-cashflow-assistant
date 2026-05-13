@@ -49,7 +49,20 @@ from pydantic import BaseModel, validator
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent.parent.resolve()
 APP_DIR = BASE_DIR / "app"
-DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR / "data")))
+# DATA_DIR: siempre relativo a BASE_DIR para evitar problemas con plantillas
+# Pinokio no resueltas en Windows ({{cwd}} puede pasar literal).
+# Patron probado del brand-assistant: calcular en Python, no depender de env.
+_raw_data_dir = os.environ.get("DATA_DIR", "")
+if _raw_data_dir and "{{" not in _raw_data_dir and Path(_raw_data_dir).is_absolute():
+    DATA_DIR = Path(_raw_data_dir)
+else:
+    DATA_DIR = BASE_DIR / "data"
+    if _raw_data_dir and "{{" in _raw_data_dir:
+        import logging as _early_log
+        _early_log.getLogger(__name__).warning(
+            "DATA_DIR contiene plantilla Pinokio sin resolver: %s. "
+            "Usando fallback: %s", _raw_data_dir, DATA_DIR
+        )
 DEFAULTS_DIR = BASE_DIR / "defaults"
 
 def _parse_port():

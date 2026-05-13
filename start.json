@@ -71,7 +71,6 @@
           "done": true
         }],
         "env": {
-          "DATA_DIR": "{{cwd}}{{platform === 'win32' ? '\\\\data' : '/data'}}",
           "OLLAMA_URL": "http://127.0.0.1:11434",
           "PYTHONIOENCODING": "utf-8",
           "PYTHONUTF8": "1"

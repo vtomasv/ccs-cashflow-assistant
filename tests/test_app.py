@@ -1150,6 +1150,16 @@ class TestCrossPlatform(unittest.TestCase):
     def test_data_dir_is_pathlib(self):
         self.assertIsInstance(DATA_DIR, Path)
 
+    def test_data_dir_no_pinokio_templates(self):
+        """DATA_DIR no debe contener plantillas Pinokio sin resolver.
+        Error real en Windows: OSError [WinError 123] por
+        DATA_DIR='{{cwd}}{{platform === ...}}\\data'."""
+        data_dir_str = str(DATA_DIR)
+        self.assertNotIn("{{", data_dir_str,
+                         f"DATA_DIR contiene plantilla Pinokio sin resolver: {data_dir_str}")
+        self.assertNotIn("}}", data_dir_str,
+                         f"DATA_DIR contiene plantilla Pinokio sin resolver: {data_dir_str}")
+
     def test_server_prints_127_not_0000(self):
         """El servidor debe imprimir http://127.0.0.1:PORT (no 0.0.0.0)
         para que el regex de start.json capture una URL válida en Windows."""
@@ -1198,6 +1208,89 @@ class TestCrossPlatform(unittest.TestCase):
         """start.json debe tener daemon: true."""
         data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
         self.assertTrue(data.get("daemon"), "start.json debe tener daemon: true")
+
+    def test_start_json_no_data_dir_with_cwd_template(self):
+        """start.json NO debe pasar DATA_DIR con {{cwd}} como env var.
+        Pinokio no resuelve expresiones ternarias complejas en env,
+        lo que causa OSError [WinError 123] en Windows.
+        El patron correcto es calcular DATA_DIR en Python (BASE_DIR / 'data')."""
+        content = (ROOT / "start.json").read_text(encoding="utf-8")
+        self.assertNotIn("{{cwd}}", content,
+                         "start.json no debe usar {{cwd}} en env vars. "
+                         "DATA_DIR debe calcularse en Python.")
+
+    def test_start_json_no_ternary_in_env(self):
+        """start.json NO debe usar operadores ternarios en valores de env.
+        Pinokio puede no resolver '{{platform === \'win32\' ? ... : ...}}'
+        correctamente, pasando la expresion literal como string."""
+        data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
+        for step in data["run"]:
+            if isinstance(step.get("params"), dict):
+                env = step["params"].get("env", {})
+                for key, val in env.items():
+                    self.assertNotIn("?", str(val),
+                                     f"env var '{key}' en start.json contiene operador ternario: {val}. "
+                                     "Pinokio puede no resolverlo en Windows.")
+
+    def test_install_json_no_ternary_in_env(self):
+        """install.json NO debe usar operadores ternarios en valores de env."""
+        data = json.loads((ROOT / "install.json").read_text(encoding="utf-8"))
+        for step in data["run"]:
+            if isinstance(step.get("params"), dict):
+                env = step["params"].get("env", {})
+                for key, val in env.items():
+                    self.assertNotIn("?", str(val),
+                                     f"env var '{key}' en install.json contiene operador ternario: {val}")
+
+    def test_no_cwd_template_in_any_env_var(self):
+        """Ningun JSON de lifecycle debe usar {{cwd}} en env vars.
+        Las rutas deben calcularse en Python usando __file__."""
+        for name in ["install.json", "start.json"]:
+            data = json.loads((ROOT / name).read_text(encoding="utf-8"))
+            for step in data["run"]:
+                if isinstance(step.get("params"), dict):
+                    env = step["params"].get("env", {})
+                    for key, val in env.items():
+                        self.assertNotIn("{{cwd}}", str(val),
+                                         f"{name}: env var '{key}' usa {{{{cwd}}}}. "
+                                         "Calcular rutas en Python.")
+
+    def test_app_py_data_dir_has_template_guard(self):
+        """server/app.py debe tener proteccion contra plantillas Pinokio
+        sin resolver en DATA_DIR ({{cwd}} literal)."""
+        content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("{{", content,
+                      "app.py debe verificar si DATA_DIR contiene '{{'")
+        self.assertIn("BASE_DIR", content)
+
+    def test_app_py_data_dir_fallback_to_base_dir(self):
+        """server/app.py debe usar BASE_DIR / 'data' como fallback seguro."""
+        content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('BASE_DIR / "data"', content,
+                      "app.py debe tener fallback DATA_DIR = BASE_DIR / 'data'")
+
+    def test_app_py_data_dir_not_just_env_get(self):
+        """server/app.py NO debe usar Path(os.environ.get('DATA_DIR', ...)) sin validacion.
+        Debe verificar que el valor no contenga plantillas Pinokio."""
+        content = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+        # No debe tener la linea simple sin guardia
+        self.assertNotIn(
+            'DATA_DIR = Path(os.environ.get("DATA_DIR"',
+            content,
+            "app.py no debe usar DATA_DIR = Path(os.environ.get('DATA_DIR', ...)) sin validacion. "
+            "Debe verificar que no contenga '{{' antes de usarlo."
+        )
+
+    def test_brand_assistant_pattern_no_data_dir_env(self):
+        """Consistencia con brand-assistant: DATA_DIR no debe pasarse como env var.
+        El patron correcto es calcularlo en Python como BASE_DIR / 'data'."""
+        data = json.loads((ROOT / "start.json").read_text(encoding="utf-8"))
+        for step in data["run"]:
+            if isinstance(step.get("params"), dict):
+                env = step["params"].get("env", {})
+                self.assertNotIn("DATA_DIR", env,
+                                 "start.json no debe pasar DATA_DIR como env var. "
+                                 "Patron brand-assistant: calcular en Python.")
 
     def test_stop_json_kills_process_cross_platform(self):
         """stop.json debe usar shell.run con pkill (unix) y wmic (win32)

@@ -252,6 +252,45 @@ check "Ambos scripts de setup tienen VERIFY_OK" "$(echo "$SETUP_PS1" | grep -q '
 check "Diagnose script existe para Windows" "$([ -f "$ROOT/scripts/diagnose.ps1" ] && echo true || echo false)"
 check "Diagnose script existe para Mac/Linux" "$([ -f "$ROOT/scripts/diagnose.sh" ] && echo true || echo false)"
 
+# --- Proteccion contra plantillas Pinokio sin resolver (WinError 123) ---
+check "start.json NO usa {{cwd}} en env vars" "$(echo "$START" | grep -qv '{{cwd}}' && echo true || echo false)"
+check "start.json NO pasa DATA_DIR como env var" "$(echo "$START" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for step in data['run']:
+    if isinstance(step.get('params'), dict):
+        env = step['params'].get('env', {})
+        if 'DATA_DIR' in env:
+            print('false')
+            sys.exit(0)
+print('true')
+" 2>/dev/null || echo true)"
+check "start.json NO tiene ternarios en env vars" "$(echo "$START" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for step in data['run']:
+    if isinstance(step.get('params'), dict):
+        for k, v in step['params'].get('env', {}).items():
+            if '?' in str(v):
+                print('false')
+                sys.exit(0)
+print('true')
+" 2>/dev/null || echo true)"
+check "install.json NO tiene ternarios en env vars" "$(echo "$INSTALL" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for step in data['run']:
+    if isinstance(step.get('params'), dict):
+        for k, v in step['params'].get('env', {}).items():
+            if '?' in str(v):
+                print('false')
+                sys.exit(0)
+print('true')
+" 2>/dev/null || echo true)"
+check "app.py tiene guardia contra plantillas Pinokio en DATA_DIR" "$(echo "$SERVER" | grep -q '{{' && echo true || echo false)"
+check "app.py usa BASE_DIR / data como fallback" "$(echo "$SERVER" | grep -q 'BASE_DIR.*data' && echo true || echo false)"
+check "app.py NO usa DATA_DIR = Path(os.environ.get directo" "$(echo "$SERVER" | grep -qv 'DATA_DIR = Path(os.environ.get' && echo true || echo false)"
+
 # ============================================================
 # RESUMEN
 # ============================================================

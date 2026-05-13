@@ -407,6 +407,63 @@ Test-Check "Diagnose script existe para Mac/Linux" {
     Test-Path "$ROOT/scripts/diagnose.sh"
 }
 
+# --- Proteccion contra plantillas Pinokio sin resolver (WinError 123) ---
+Test-Check "start.json NO usa {{cwd}} en env vars" {
+    -not ($startContent -match '\{\{cwd\}\}')
+}
+Test-Check "start.json NO pasa DATA_DIR como env var" {
+    $startJson = $startContent | ConvertFrom-Json
+    $found = $false
+    foreach ($step in $startJson.run) {
+        if ($step.params -and $step.params.env) {
+            $envObj = $step.params.env
+            if ($envObj.PSObject.Properties.Name -contains 'DATA_DIR') {
+                $found = $true
+            }
+        }
+    }
+    -not $found
+}
+Test-Check "start.json NO tiene operadores ternarios en env vars" {
+    $startJson = $startContent | ConvertFrom-Json
+    $hasTernary = $false
+    foreach ($step in $startJson.run) {
+        if ($step.params -and $step.params.env) {
+            $envObj = $step.params.env
+            foreach ($prop in $envObj.PSObject.Properties) {
+                if ($prop.Value -match '\?') {
+                    $hasTernary = $true
+                }
+            }
+        }
+    }
+    -not $hasTernary
+}
+Test-Check "install.json NO tiene operadores ternarios en env vars" {
+    $installJson = $installContent | ConvertFrom-Json
+    $hasTernary = $false
+    foreach ($step in $installJson.run) {
+        if ($step.params -and $step.params.env) {
+            $envObj = $step.params.env
+            foreach ($prop in $envObj.PSObject.Properties) {
+                if ($prop.Value -match '\?') {
+                    $hasTernary = $true
+                }
+            }
+        }
+    }
+    -not $hasTernary
+}
+Test-Check "app.py tiene guardia contra plantillas Pinokio en DATA_DIR" {
+    $serverContent -match '\{\{'
+}
+Test-Check "app.py usa BASE_DIR / data como fallback" {
+    $serverContent -match 'BASE_DIR.*"data"'
+}
+Test-Check "app.py NO usa DATA_DIR = Path(os.environ.get directo" {
+    -not ($serverContent -match 'DATA_DIR = Path\(os\.environ\.get')
+}
+
 # ============================================================
 # RESUMEN
 # ============================================================
