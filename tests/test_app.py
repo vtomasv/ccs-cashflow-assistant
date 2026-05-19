@@ -337,7 +337,7 @@ class TestHealthEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["ollama"], "connected")
-        self.assertEqual(data["version"], "0.2.0")
+        self.assertEqual(data["version"], "0.3.0")
 
     @patch("app.http_requests.get", side_effect=Exception("Connection refused"))
     def test_health_ollama_disconnected(self, mock_get):

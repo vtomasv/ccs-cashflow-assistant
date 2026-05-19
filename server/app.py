@@ -25,6 +25,7 @@ import argparse
 import subprocess
 import time
 import unicodedata
+import copy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -49,9 +50,6 @@ from pydantic import BaseModel, validator
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent.parent.resolve()
 APP_DIR = BASE_DIR / "app"
-# DATA_DIR: siempre relativo a BASE_DIR para evitar problemas con plantillas
-# Pinokio no resueltas en Windows ({{cwd}} puede pasar literal).
-# Patron probado del brand-assistant: calcular en Python, no depender de env.
 _raw_data_dir = os.environ.get("DATA_DIR", "")
 if _raw_data_dir and "{{" not in _raw_data_dir and Path(_raw_data_dir).is_absolute():
     DATA_DIR = Path(_raw_data_dir)
@@ -88,18 +86,18 @@ def _get_timeout(task_type: str = "default") -> int:
     timeout_map = {
         "default": ("OLLAMA_TIMEOUT", 300),
         "analysis": ("OLLAMA_TIMEOUT_ANALYSIS", 600),
-        "simulation": ("OLLAMA_TIMEOUT_SIMULATION", 600),
+        "simulation": ("OLLAMA_TIMEOUT_SIMULATION", 180),
     }
     env_key, default_val = timeout_map.get(task_type, ("OLLAMA_TIMEOUT", 300))
     config_key = f"ollama_timeout_{task_type}" if task_type != "default" else "ollama_timeout"
     return int(config.get(config_key) or os.getenv(env_key) or default_val)
 
 # Límites de seguridad
-MAX_MESSAGE_LENGTH = 10000  # Máximo caracteres por mensaje de chat
+MAX_MESSAGE_LENGTH = 10000
 MAX_COMPANY_NAME_LENGTH = 200
-MAX_MONTHS = 60  # Máximo meses en un flujo de caja
-RATE_LIMIT_WINDOW = 60  # segundos
-RATE_LIMIT_MAX_REQUESTS = 20  # máximo de requests de generación por ventana
+MAX_MONTHS = 60
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_MAX_REQUESTS = 20
 
 # ---------------------------------------------------------------------------
 # Logging (sin datos financieros sensibles)
@@ -123,13 +121,10 @@ def _sanitize_filename(name: str) -> str:
     """Sanitiza un nombre para uso seguro en nombres de archivo."""
     if not name:
         return "empresa"
-    # Normalizar unicode, remover caracteres peligrosos
     name = unicodedata.normalize("NFKD", name)
     name = _SAFE_FILENAME_CHARS.sub("", name)
     name = name.strip().replace(" ", "_")
-    # Limitar longitud y prevenir nombres vacíos
     name = name[:50] if name else "empresa"
-    # Prevenir nombres reservados de Windows
     reserved = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
                 "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
                 "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
@@ -145,7 +140,6 @@ _rate_limit_store: Dict[str, list] = defaultdict(list)
 def _check_rate_limit(key: str, max_requests: int = RATE_LIMIT_MAX_REQUESTS, window: int = RATE_LIMIT_WINDOW):
     """Verifica rate limit por clave. Lanza HTTPException 429 si se excede."""
     now = time.time()
-    # Limpiar entradas antiguas
     _rate_limit_store[key] = [t for t in _rate_limit_store[key] if now - t < window]
     if len(_rate_limit_store[key]) >= max_requests:
         raise HTTPException(429, f"Demasiadas solicitudes. Espera {window} segundos.")
@@ -154,7 +148,7 @@ def _check_rate_limit(key: str, max_requests: int = RATE_LIMIT_MAX_REQUESTS, win
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
-app = FastAPI(title="CCS Cashflow Assistant", version="0.2.0")
+app = FastAPI(title="CCS Cashflow Assistant", version="0.3.0")
 
 # CORS restringido a localhost (Pinokio siempre corre en localhost)
 app.add_middleware(
@@ -163,7 +157,7 @@ app.add_middleware(
         "http://localhost:*",
         "http://127.0.0.1:*",
         "http://0.0.0.0:*",
-        "null",  # Pinokio webview puede enviar origin: null
+        "null",
     ],
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$",
     allow_methods=["GET", "POST", "PUT", "DELETE"],
@@ -246,7 +240,6 @@ def ensure_ollama_running() -> bool:
         return r.status_code == 200
     except Exception:
         pass
-    # Intentar iniciar Ollama en background
     try:
         logger.info("Ollama no responde. Intentando iniciar...")
         if sys.platform == "win32":
@@ -262,7 +255,6 @@ def ensure_ollama_running() -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-        # Esperar hasta 15 segundos con reintentos
         for attempt in range(5):
             time.sleep(3)
             try:
@@ -316,7 +308,6 @@ def call_ollama(model: str, system_prompt: str, user_message: str,
                 temperature: float = 0.7, timeout: int = None) -> str:
     if timeout is None:
         timeout = _get_timeout("default")
-    # Auto-recuperación: intentar iniciar Ollama si no responde
     if not ensure_ollama_running():
         raise HTTPException(503, "Ollama no está disponible. Verifica que esté instalado y ejecutándose.")
     try:
@@ -389,7 +380,6 @@ def get_agent(agent_id: str) -> dict:
     return None
 
 def get_prompt(prompt_name: str) -> str:
-    # Sanitizar nombre de prompt para prevenir path traversal
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", prompt_name)
     if not safe_name:
         return ""
@@ -424,7 +414,6 @@ class ChatMessage(BaseModel):
 
     @validator("session_id", pre=True, always=True)
     def coerce_session_id(cls, v):
-        """Aceptar null/None del frontend y convertir a string vacío."""
         if v is None:
             return ""
         return str(v)
@@ -439,6 +428,8 @@ class ChatMessage(BaseModel):
 
 class ScenarioRequest(BaseModel):
     instruction: str
+    use_ai: Optional[bool] = False
+    params: Optional[Dict[str, Any]] = None
 
     @validator("instruction")
     def validate_instruction(cls, v):
@@ -475,32 +466,23 @@ class MonthData(BaseModel):
 # Normalización de datos de flujo de caja
 # ---------------------------------------------------------------------------
 def _to_num(val) -> float:
-    """Convierte un valor a número de forma robusta.
-    Soporta formatos: 1000000, 1.000.000 (CLP), $1.000.000, -500.
-    """
+    """Convierte un valor a número de forma robusta."""
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
         return float(val)
     if isinstance(val, str):
-        # Remover símbolos de moneda y espacios
         clean = val.strip().replace("$", "").replace(" ", "")
-        # Detectar formato con puntos como separador de miles (ej: 1.000.000)
-        # Si hay más de un punto, son separadores de miles
         if clean.count(".") > 1:
             clean = clean.replace(".", "")
-        # Si hay punto y coma, la coma es decimal (formato europeo)
         elif "." in clean and "," in clean:
             clean = clean.replace(".", "").replace(",", ".")
-        # Si solo hay coma, puede ser decimal
         elif "," in clean and "." not in clean:
-            # Si la coma está en posición de miles (ej: 1,000,000)
             parts = clean.split(",")
             if all(len(p) == 3 for p in parts[1:]):
                 clean = clean.replace(",", "")
             else:
                 clean = clean.replace(",", ".")
-        # Remover caracteres no numéricos excepto punto y signo negativo
         clean = re.sub(r"[^\d.\-]", "", clean)
         try:
             return float(clean) if clean else 0.0
@@ -549,7 +531,7 @@ def _normalize_month(m: dict) -> dict:
             "total": expenses_total
         },
         "net_flow": net_flow,
-        "cumulative_balance": 0  # Se recalcula en normalize_cashflow
+        "cumulative_balance": 0
     }
 
 def normalize_cashflow(data: dict) -> dict:
@@ -557,8 +539,6 @@ def normalize_cashflow(data: dict) -> dict:
     months = data.get("months", [])
     if not isinstance(months, list):
         months = []
-
-    # Limitar cantidad de meses por seguridad
     months = months[:MAX_MONTHS]
 
     normalized_months = []
@@ -590,6 +570,232 @@ def normalize_cashflow(data: dict) -> dict:
     return data
 
 # ---------------------------------------------------------------------------
+# Motor de Simulación Local (sin LLM - rápido y determinístico)
+# ---------------------------------------------------------------------------
+def simulate_local(cashflow: dict, params: dict, task_id: str = None) -> dict:
+    """
+    Ejecuta simulación matemática local sin necesidad de LLM.
+    Parámetros soportados:
+      - sales_change_pct: % de cambio en ventas
+      - costs_change_pct: % de cambio en costos variables
+      - fixed_costs_change_pct: % de cambio en costos fijos
+      - inflation_annual_pct: inflación anual (aplicada mensualmente)
+      - new_hires: número de nuevas contrataciones
+      - hire_cost: costo mensual por contratación (default 800000)
+      - tax_change_pct: % de cambio en impuestos
+      - debt_change_pct: % de cambio en pagos de deuda
+      - investment_change_pct: % de cambio en inversiones
+      - other_income_change_pct: % de cambio en otros ingresos
+      - start_month: mes desde el cual aplicar cambios (0-based, default 0)
+    """
+    result = copy.deepcopy(cashflow)
+    months = result.get("months", [])
+    if not months:
+        return result
+
+    # Actualizar progreso
+    if task_id:
+        _generation_status[task_id]["progress"] = 20
+        _generation_status[task_id]["step"] = "Preparando parámetros de simulación..."
+
+    sales_pct = params.get("sales_change_pct", 0) / 100.0
+    costs_pct = params.get("costs_change_pct", 0) / 100.0
+    fixed_costs_pct = params.get("fixed_costs_change_pct", 0) / 100.0
+    inflation_annual = params.get("inflation_annual_pct", 0) / 100.0
+    new_hires = params.get("new_hires", 0)
+    hire_cost = params.get("hire_cost", 800000)
+    tax_pct = params.get("tax_change_pct", 0) / 100.0
+    debt_pct = params.get("debt_change_pct", 0) / 100.0
+    investment_pct = params.get("investment_change_pct", 0) / 100.0
+    other_income_pct = params.get("other_income_change_pct", 0) / 100.0
+    start_month = params.get("start_month", 0)
+
+    # Inflación mensual compuesta
+    monthly_inflation = (1 + inflation_annual) ** (1/12) - 1 if inflation_annual > 0 else 0
+
+    total_months = len(months)
+    changes_applied = []
+
+    if task_id:
+        _generation_status[task_id]["progress"] = 30
+        _generation_status[task_id]["step"] = "Aplicando cambios a los meses..."
+
+    # Guardar checkpoint inicial
+    if task_id:
+        _save_simulation_checkpoint(task_id, result, 0, total_months)
+
+    for i in range(total_months):
+        if i < start_month:
+            continue
+
+        month = months[i]
+        income = month.get("income", {})
+        expenses = month.get("expenses", {})
+
+        # Calcular factor de inflación acumulada desde start_month
+        months_elapsed = i - start_month
+        inflation_factor = (1 + monthly_inflation) ** months_elapsed if monthly_inflation > 0 else 1.0
+
+        # Aplicar cambios a ingresos
+        if sales_pct != 0:
+            income["sales"] = round(income.get("sales", 0) * (1 + sales_pct), 2)
+        if other_income_pct != 0:
+            income["other_income"] = round(income.get("other_income", 0) * (1 + other_income_pct), 2)
+
+        # Aplicar cambios a gastos
+        if costs_pct != 0:
+            expenses["variable_costs"] = round(expenses.get("variable_costs", 0) * (1 + costs_pct), 2)
+        if fixed_costs_pct != 0:
+            expenses["fixed_costs"] = round(expenses.get("fixed_costs", 0) * (1 + fixed_costs_pct), 2)
+        if tax_pct != 0:
+            expenses["taxes"] = round(expenses.get("taxes", 0) * (1 + tax_pct), 2)
+        if debt_pct != 0:
+            expenses["debt_payments"] = round(expenses.get("debt_payments", 0) * (1 + debt_pct), 2)
+        if investment_pct != 0:
+            expenses["investments"] = round(expenses.get("investments", 0) * (1 + investment_pct), 2)
+
+        # Nuevas contrataciones (afecta costos fijos)
+        if new_hires > 0:
+            expenses["fixed_costs"] = round(expenses.get("fixed_costs", 0) + (new_hires * hire_cost), 2)
+
+        # Inflación (afecta costos fijos y gastos variables progresivamente)
+        if monthly_inflation > 0:
+            expenses["fixed_costs"] = round(expenses.get("fixed_costs", 0) * inflation_factor, 2)
+            expenses["variable_expenses"] = round(expenses.get("variable_expenses", 0) * inflation_factor, 2)
+
+        month["income"] = income
+        month["expenses"] = expenses
+        months[i] = month
+
+        # Actualizar progreso cada 2 meses
+        if task_id and (i % 2 == 0 or i == total_months - 1):
+            progress = 30 + int((i / total_months) * 50)
+            _generation_status[task_id]["progress"] = progress
+            _generation_status[task_id]["step"] = f"Procesando mes {i + 1} de {total_months}..."
+            # Guardar checkpoint cada 4 meses
+            if i % 4 == 0:
+                _save_simulation_checkpoint(task_id, result, i, total_months)
+
+    result["months"] = months
+
+    if task_id:
+        _generation_status[task_id]["progress"] = 85
+        _generation_status[task_id]["step"] = "Recalculando totales y alertas..."
+
+    # Re-normalizar
+    result = normalize_cashflow(result)
+
+    # Generar descripción de cambios
+    if sales_pct != 0:
+        changes_applied.append(f"Ventas {'aumentadas' if sales_pct > 0 else 'reducidas'} en {abs(int(sales_pct*100))}%")
+    if costs_pct != 0:
+        changes_applied.append(f"Costos variables {'aumentados' if costs_pct > 0 else 'reducidos'} en {abs(int(costs_pct*100))}%")
+    if fixed_costs_pct != 0:
+        changes_applied.append(f"Costos fijos {'aumentados' if fixed_costs_pct > 0 else 'reducidos'} en {abs(int(fixed_costs_pct*100))}%")
+    if inflation_annual > 0:
+        changes_applied.append(f"Inflación anual del {int(inflation_annual*100)}% aplicada")
+    if new_hires > 0:
+        changes_applied.append(f"{new_hires} nuevas contrataciones (${hire_cost:,.0f} c/u)")
+    if tax_pct != 0:
+        changes_applied.append(f"Impuestos {'aumentados' if tax_pct > 0 else 'reducidos'} en {abs(int(tax_pct*100))}%")
+    if debt_pct != 0:
+        changes_applied.append(f"Pagos de deuda {'aumentados' if debt_pct > 0 else 'reducidos'} en {abs(int(debt_pct*100))}%")
+    if investment_pct != 0:
+        changes_applied.append(f"Inversiones {'aumentadas' if investment_pct > 0 else 'reducidas'} en {abs(int(investment_pct*100))}%")
+    if other_income_pct != 0:
+        changes_applied.append(f"Otros ingresos {'aumentados' if other_income_pct > 0 else 'reducidos'} en {abs(int(other_income_pct*100))}%")
+
+    # Generar alertas automáticas
+    alerts = []
+    for i, m in enumerate(result["months"]):
+        if m["cumulative_balance"] < 0:
+            alerts.append({
+                "month": m.get("label", m.get("month", f"Mes {i+1}")),
+                "type": "danger",
+                "message": f"Saldo acumulado negativo: ${m['cumulative_balance']:,.0f}"
+            })
+        elif m["net_flow"] < 0:
+            alerts.append({
+                "month": m.get("label", m.get("month", f"Mes {i+1}")),
+                "type": "warning",
+                "message": f"Flujo neto negativo: ${m['net_flow']:,.0f}"
+            })
+
+    # Generar nombre del escenario
+    scenario_name = "Simulación: " + ", ".join(changes_applied[:3])
+    if len(changes_applied) > 3:
+        scenario_name += f" (+{len(changes_applied)-3} más)"
+
+    # Calcular impacto
+    base_summary = cashflow.get("summary", {})
+    new_summary = result.get("summary", {})
+    impact_income = new_summary.get("total_income", 0) - base_summary.get("total_income", 0)
+    impact_expenses = new_summary.get("total_expenses", 0) - base_summary.get("total_expenses", 0)
+    impact_net = new_summary.get("net_cashflow", 0) - base_summary.get("net_cashflow", 0)
+
+    result["scenario_name"] = scenario_name
+    result["changes_applied"] = changes_applied
+    result["alerts"] = alerts
+    result["impact_summary"] = {
+        "income_change": impact_income,
+        "expenses_change": impact_expenses,
+        "net_change": impact_net,
+        "description": f"Impacto neto: ${impact_net:+,.0f} en el período"
+    }
+    result["recommendations"] = _generate_recommendations(result, cashflow)
+
+    if task_id:
+        _generation_status[task_id]["progress"] = 95
+        _generation_status[task_id]["step"] = "Finalizando simulación..."
+
+    return result
+
+
+def _generate_recommendations(simulated: dict, original: dict) -> list:
+    """Genera recomendaciones basadas en la comparación entre simulado y original."""
+    recs = []
+    sim_summary = simulated.get("summary", {})
+    orig_summary = original.get("summary", {})
+
+    net_change = sim_summary.get("net_cashflow", 0) - orig_summary.get("net_cashflow", 0)
+
+    if net_change < 0:
+        recs.append("El escenario simulado reduce el flujo neto. Considere medidas compensatorias.")
+    if net_change > 0:
+        recs.append("El escenario simulado mejora el flujo neto. Evalúe su viabilidad de implementación.")
+
+    # Verificar meses con saldo negativo
+    negative_months = [m for m in simulated.get("months", []) if m.get("cumulative_balance", 0) < 0]
+    if negative_months:
+        recs.append(f"Hay {len(negative_months)} mes(es) con saldo acumulado negativo. Considere líneas de crédito o reducción de gastos.")
+
+    # Verificar tendencia
+    months = simulated.get("months", [])
+    if len(months) >= 3:
+        last_3_flows = [m.get("net_flow", 0) for m in months[-3:]]
+        if all(f < 0 for f in last_3_flows):
+            recs.append("Los últimos 3 meses muestran flujo negativo sostenido. Revise la estrategia financiera.")
+        elif all(f > 0 for f in last_3_flows):
+            recs.append("Los últimos 3 meses muestran flujo positivo sostenido. Buen momento para inversiones.")
+
+    return recs
+
+
+def _save_simulation_checkpoint(task_id: str, data: dict, month_index: int, total_months: int):
+    """Guarda un checkpoint de la simulación en disco para recuperación."""
+    checkpoints_dir = DATA_DIR / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "task_id": task_id,
+        "timestamp": datetime.now().isoformat(),
+        "month_index": month_index,
+        "total_months": total_months,
+        "partial_data": data
+    }
+    save_json(checkpoints_dir / f"{task_id}.json", checkpoint)
+
+
+# ---------------------------------------------------------------------------
 # Estado de generación (en memoria)
 # ---------------------------------------------------------------------------
 _generation_status: dict = {}
@@ -612,7 +818,7 @@ async def health():
         "status": "ok",
         "ollama": "connected" if ollama_ok else "disconnected",
         "ollama_models": ollama_models,
-        "version": "0.2.0",
+        "version": "0.3.0",
         "platform": sys.platform
     }
 
@@ -621,13 +827,9 @@ async def health():
 # ---------------------------------------------------------------------------
 @app.get("/api/readiness")
 async def check_readiness():
-    """Verifica si la aplicación está lista para ser usada.
-    Comprueba: Ollama disponible, al menos un modelo descargado,
-    y que no haya descargas críticas en curso."""
     issues = []
     ready = True
 
-    # Verificar Ollama
     ollama_ok = False
     models = []
     try:
@@ -654,7 +856,6 @@ async def check_readiness():
             "severity": "warning",
         })
 
-    # Verificar descargas en curso
     active_pulls = []
     for model_name, info in _pull_status.items():
         if info.get("status") in ("queued", "pulling"):
@@ -686,7 +887,6 @@ async def check_readiness():
 # ---------------------------------------------------------------------------
 @app.get("/api/ollama/status")
 async def ollama_status():
-    """Verifica si Ollama está disponible y lista los modelos instalados."""
     try:
         resp = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         models = [m["name"] for m in resp.json().get("models", [])]
@@ -699,11 +899,8 @@ async def ollama_status():
 # ---------------------------------------------------------------------------
 @app.get("/api/hardware/performance")
 async def get_hardware_performance():
-    """Detecta hardware del sistema y estima rendimiento de modelos instalados.
-    Inspirado en canirun.ai: muestra semáforo de rendimiento por modelo."""
     import platform as plat
 
-    # --- Detectar hardware ---
     hw = {
         "platform": sys.platform,
         "platform_name": plat.system(),
@@ -714,7 +911,6 @@ async def get_hardware_performance():
         "vram_gb": 0,
     }
 
-    # RAM total
     try:
         if sys.platform == "win32":
             import ctypes
@@ -747,7 +943,6 @@ async def get_hardware_performance():
     except Exception as e:
         logger.debug(f"No se pudo detectar RAM: {e}")
 
-    # GPU (intentar detectar via nvidia-smi o Apple Silicon)
     try:
         if sys.platform == "darwin" and plat.machine() == "arm64":
             hw["gpu_name"] = f"Apple Silicon ({plat.processor() or 'M-series'})"
@@ -764,7 +959,6 @@ async def get_hardware_performance():
     except Exception:
         pass
 
-    # --- Obtener modelos instalados ---
     models_perf = []
     try:
         resp = http_requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
@@ -799,7 +993,6 @@ async def get_hardware_performance():
 
 
 def _estimate_model_params(model_name: str) -> float:
-    """Estima los parámetros (en billones) de un modelo por su nombre."""
     name_lower = model_name.lower()
     match = re.search(r'(\d+\.?\d*)b', name_lower)
     if match:
@@ -823,9 +1016,7 @@ def _estimate_tokens_per_second(
     params_b: float, ram_gb: float, vram_gb: float,
     cpu_count: int, gpu_name: str
 ) -> int:
-    """Estima tokens por segundo basado en hardware y tamaño del modelo."""
     model_gb = params_b * 0.6
-
     is_apple_silicon = "apple" in gpu_name.lower() or "m1" in gpu_name.lower() or "m2" in gpu_name.lower() or "m3" in gpu_name.lower() or "m4" in gpu_name.lower()
     has_nvidia = "nvidia" in gpu_name.lower() or "geforce" in gpu_name.lower() or "rtx" in gpu_name.lower()
 
@@ -836,7 +1027,6 @@ def _estimate_tokens_per_second(
         bandwidth_factor = min(2.0, ram_gb / 16.0)
         base_tps = 60 / (params_b / 8.0)
         return max(1, int(base_tps * bandwidth_factor))
-
     elif has_nvidia and vram_gb > 0:
         if model_gb <= vram_gb * 0.9:
             base_tps = 80 / (params_b / 8.0)
@@ -845,7 +1035,6 @@ def _estimate_tokens_per_second(
             return max(1, int(20 / (params_b / 8.0)))
         else:
             return max(1, int(5 / (params_b / 8.0)))
-
     else:
         if model_gb > ram_gb * 0.7:
             return max(1, int(2 * (ram_gb / model_gb)))
@@ -855,10 +1044,8 @@ def _estimate_tokens_per_second(
 
 
 def _compute_grade(tps: int, model_size_gb: float, ram_gb: float) -> dict:
-    """Calcula el grado/semáforo de rendimiento para un modelo."""
     if ram_gb > 0 and model_size_gb > ram_gb * 0.9:
         return {"grade": "F", "label": "NO EJECUTABLE", "color": "#dc2626", "score": 0}
-
     if tps >= 30:
         score = min(100, 80 + int((tps - 30) * 0.5))
         return {"grade": "S", "label": "EXCELENTE", "color": "#22c55e", "score": score}
@@ -884,17 +1071,17 @@ def _compute_grade(tps: int, model_size_gb: float, ram_gb: float) -> dict:
 @app.post("/api/companies", status_code=201)
 async def create_company(data: CompanyCreate):
     company_id = str(uuid.uuid4())[:8]
+    company_dir = DATA_DIR / "companies" / company_id
+    company_dir.mkdir(parents=True, exist_ok=True)
     company = {
         "id": company_id,
         "name": data.name,
         "sector": data.sector,
         "description": data.description,
-        "status": "new",
+        "status": "pending",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat()
     }
-    company_dir = DATA_DIR / "companies" / company_id
-    company_dir.mkdir(parents=True, exist_ok=True)
     save_json(company_dir / "company.json", company)
     logger.info(f"Empresa creada: {company_id}")
     return company
@@ -906,41 +1093,39 @@ async def list_companies():
     companies = []
     for d in sorted(companies_dir.iterdir()):
         if d.is_dir():
-            c = load_json(d / "company.json")
-            if c:
-                companies.append(c)
+            company = load_json(d / "company.json")
+            if company:
+                companies.append(company)
     return {"companies": companies}
 
 @app.get("/api/companies/{company_id}")
 async def get_company(company_id: str):
     company_id = _sanitize_id(company_id)
-    path = DATA_DIR / "companies" / company_id / "company.json"
-    if not path.exists():
+    company_dir = DATA_DIR / "companies" / company_id
+    if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
-    return load_json(path)
+    return load_json(company_dir / "company.json")
 
 @app.delete("/api/companies/{company_id}")
 async def delete_company(company_id: str):
     company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
-    if not company_dir.exists():
-        raise HTTPException(404, "Empresa no encontrada")
-    shutil.rmtree(str(company_dir))
-    # Limpiar sesiones asociadas
+    if company_dir.exists():
+        shutil.rmtree(str(company_dir))
+    # Limpiar sesiones
     sessions_dir = DATA_DIR / "sessions"
     if sessions_dir.exists():
-        for f in sessions_dir.glob(f"{company_id}_*.json"):
+        for f in sessions_dir.glob(f"{company_id}_*"):
             f.unlink()
-    # Limpiar escenarios asociados
+    # Limpiar escenarios
     scenarios_dir = DATA_DIR / "scenarios"
     if scenarios_dir.exists():
-        for f in scenarios_dir.glob(f"{company_id}_*.json"):
+        for f in scenarios_dir.glob(f"{company_id}_*"):
             f.unlink()
-    logger.info(f"Empresa eliminada: {company_id}")
     return {"status": "deleted"}
 
 # ---------------------------------------------------------------------------
-# Endpoints: Chat de Entrevista
+# Endpoints: Chat / Entrevista
 # ---------------------------------------------------------------------------
 @app.post("/api/chat/interview")
 async def chat_interview(data: ChatMessage):
@@ -949,23 +1134,14 @@ async def chat_interview(data: ChatMessage):
     if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
 
-    company = load_json(company_dir / "company.json")
-
-    # Rate limiting por empresa
     _check_rate_limit(f"chat_{company_id}")
 
-    # Cargar o crear sesión
-    session_id = data.session_id or f"int_{str(uuid.uuid4())[:8]}"
-    # Sanitizar session_id
+    company = load_json(company_dir / "company.json")
+
+    session_id = data.session_id or str(uuid.uuid4())[:8]
     session_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64]
     session_path = DATA_DIR / "sessions" / f"{company_id}_{session_id}.json"
-    session = load_json(session_path, {
-        "id": session_id,
-        "company_id": company_id,
-        "type": "interview",
-        "messages": [],
-        "created_at": datetime.now().isoformat()
-    })
+    session = load_json(session_path, {"id": session_id, "company_id": company_id, "type": "interview", "messages": [], "created_at": datetime.now().isoformat()})
 
     agent = get_agent("financial_interviewer")
     if not agent:
@@ -975,12 +1151,7 @@ async def chat_interview(data: ChatMessage):
     if agent.get("system_prompt"):
         system_prompt = agent["system_prompt"]
 
-    # Construir contexto
-    context = f"Empresa: {company.get('name', 'Sin nombre')}\nSector: {company.get('sector', 'No especificado')}\n"
-    if company.get("description"):
-        context += f"Descripción: {company['description']}\n"
-
-    messages = [{"role": "system", "content": system_prompt + "\n\nCONTEXTO:\n" + context}]
+    messages = [{"role": "system", "content": system_prompt}]
     for msg in session.get("messages", []):
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": data.message})
@@ -995,8 +1166,7 @@ async def chat_interview(data: ChatMessage):
     session["messages"].append({"role": "assistant", "content": response, "timestamp": datetime.now().isoformat()})
     save_json(session_path, session)
 
-    # Actualizar estado de la empresa
-    if company.get("status") == "new":
+    if company.get("status") == "pending":
         company["status"] = "interviewing"
         company["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "company.json", company)
@@ -1017,11 +1187,10 @@ async def generate_cashflow(company_id: str, background_tasks: BackgroundTasks):
     if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
 
-    # Rate limiting
     _check_rate_limit(f"gen_{company_id}", max_requests=5, window=120)
 
     task_id = str(uuid.uuid4())[:8]
-    _generation_status[task_id] = {"status": "generating", "progress": 0, "error": None}
+    _generation_status[task_id] = {"status": "generating", "progress": 0, "error": None, "step": "Iniciando..."}
 
     background_tasks.add_task(_generate_cashflow_task, company_id, task_id)
     return {"task_id": task_id, "status": "generating"}
@@ -1031,7 +1200,9 @@ def _generate_cashflow_task(company_id: str, task_id: str):
         company_dir = DATA_DIR / "companies" / company_id
         company = load_json(company_dir / "company.json")
 
-        # Recopilar toda la información de las sesiones
+        _generation_status[task_id]["step"] = "Recopilando información de entrevistas..."
+        _generation_status[task_id]["progress"] = 10
+
         sessions_dir = DATA_DIR / "sessions"
         all_messages = []
         for f in sorted(sessions_dir.glob(f"{company_id}_*.json")):
@@ -1040,17 +1211,15 @@ def _generate_cashflow_task(company_id: str, task_id: str):
                 all_messages.append(f"{msg['role'].upper()}: {msg['content']}")
 
         conversation_text = "\n".join(all_messages)
-
-        # Limitar tamaño de la conversación para evitar desbordamiento
         if len(conversation_text) > 50000:
             conversation_text = conversation_text[:50000] + "\n[... conversación truncada por longitud ...]"
 
-        _generation_status[task_id]["progress"] = 30
+        _generation_status[task_id]["progress"] = 25
+        _generation_status[task_id]["step"] = "Preparando análisis financiero..."
 
-        # Obtener agente analista
         agent = get_agent("cashflow_analyst")
         if not agent:
-            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "Agente analista no configurado"}
+            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "Agente analista no configurado", "step": "Error"}
             return
 
         system_prompt = get_prompt("cashflow_analyst")
@@ -1065,7 +1234,8 @@ CONVERSACIÓN COMPLETA:
 
 Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tus instrucciones."""
 
-        _generation_status[task_id]["progress"] = 50
+        _generation_status[task_id]["progress"] = 40
+        _generation_status[task_id]["step"] = "La IA está analizando los datos financieros..."
 
         response = call_ollama(
             model=agent.get("model", "llama3.1:8b"),
@@ -1075,15 +1245,17 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
             timeout=_get_timeout("analysis")
         )
 
-        _generation_status[task_id]["progress"] = 80
+        _generation_status[task_id]["progress"] = 75
+        _generation_status[task_id]["step"] = "Procesando resultados..."
 
-        # Extraer JSON de la respuesta
         cashflow_data = _extract_json_from_llm(response)
         if not cashflow_data:
-            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "No se pudo generar el flujo de caja. Intenta proporcionar más información."}
+            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "No se pudo generar el flujo de caja. Intenta proporcionar más información.", "step": "Error"}
             return
 
-        # Normalizar y guardar flujo de caja
+        _generation_status[task_id]["progress"] = 85
+        _generation_status[task_id]["step"] = "Normalizando y validando datos..."
+
         cashflow_data = normalize_cashflow(cashflow_data)
         cashflow_data["id"] = str(uuid.uuid4())[:8]
         cashflow_data["company_id"] = company_id
@@ -1091,21 +1263,20 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
         save_json(company_dir / "cashflow.json", cashflow_data)
         logger.info(f"Flujo de caja generado: {len(cashflow_data.get('months', []))} meses para empresa {company_id}")
 
-        # Actualizar estado de la empresa
         company["status"] = "complete"
         company["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "company.json", company)
 
-        _generation_status[task_id] = {"status": "done", "progress": 100, "error": None}
+        _generation_status[task_id] = {"status": "done", "progress": 100, "error": None, "step": "Completado"}
 
     except Exception as e:
         logger.error(f"Error generando flujo de caja para {company_id}: {type(e).__name__}")
-        _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e)}
+        _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e), "step": "Error"}
 
 @app.get("/api/generation/{task_id}/progress")
 async def get_generation_progress(task_id: str):
     task_id = re.sub(r"[^a-zA-Z0-9_-]", "", task_id)[:64]
-    return _generation_status.get(task_id, {"status": "unknown", "progress": 0, "error": "Tarea no encontrada"})
+    return _generation_status.get(task_id, {"status": "unknown", "progress": 0, "error": "Tarea no encontrada", "step": ""})
 
 @app.get("/api/companies/{company_id}/cashflow")
 async def get_cashflow(company_id: str):
@@ -1114,7 +1285,6 @@ async def get_cashflow(company_id: str):
     if not path.exists():
         raise HTTPException(404, "Flujo de caja no encontrado. Genera uno primero.")
     data = load_json(path)
-    # Siempre re-normalizar al leer para garantizar consistencia
     data = normalize_cashflow(data)
     return data
 
@@ -1123,7 +1293,6 @@ async def get_cashflow(company_id: str):
 # ---------------------------------------------------------------------------
 @app.put("/api/companies/{company_id}/cashflow/months/{month_index}")
 async def update_month(company_id: str, month_index: int, month_data: MonthData):
-    """Actualiza un mes específico del flujo de caja por índice (0-based)."""
     company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
@@ -1136,7 +1305,6 @@ async def update_month(company_id: str, month_index: int, month_data: MonthData)
     if month_index < 0 or month_index >= len(months):
         raise HTTPException(400, f"Índice de mes inválido: {month_index}. Rango válido: 0-{len(months)-1}")
 
-    # Actualizar campos proporcionados
     existing = months[month_index]
     if month_data.month:
         existing["month"] = month_data.month
@@ -1149,8 +1317,6 @@ async def update_month(company_id: str, month_index: int, month_data: MonthData)
 
     months[month_index] = existing
     cashflow["months"] = months
-
-    # Re-normalizar todo
     cashflow = normalize_cashflow(cashflow)
     save_json(cashflow_path, cashflow)
 
@@ -1158,7 +1324,6 @@ async def update_month(company_id: str, month_index: int, month_data: MonthData)
 
 @app.post("/api/companies/{company_id}/cashflow/months")
 async def add_month(company_id: str, month_data: MonthData):
-    """Agrega un nuevo mes al flujo de caja."""
     company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
@@ -1179,7 +1344,6 @@ async def add_month(company_id: str, month_data: MonthData):
     }
     months.append(new_month)
     cashflow["months"] = months
-
     cashflow = normalize_cashflow(cashflow)
     save_json(cashflow_path, cashflow)
 
@@ -1187,7 +1351,6 @@ async def add_month(company_id: str, month_data: MonthData):
 
 @app.delete("/api/companies/{company_id}/cashflow/months/{month_index}")
 async def delete_month(company_id: str, month_index: int):
-    """Elimina un mes del flujo de caja por índice (0-based)."""
     company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
@@ -1202,14 +1365,13 @@ async def delete_month(company_id: str, month_index: int):
 
     months.pop(month_index)
     cashflow["months"] = months
-
     cashflow = normalize_cashflow(cashflow)
     save_json(cashflow_path, cashflow)
 
     return cashflow
 
 # ---------------------------------------------------------------------------
-# Endpoints: Simulación de Escenarios
+# Endpoints: Simulación de Escenarios (OPTIMIZADA)
 # ---------------------------------------------------------------------------
 @app.post("/api/companies/{company_id}/simulate")
 async def simulate_scenario(company_id: str, data: ScenarioRequest, background_tasks: BackgroundTasks):
@@ -1219,43 +1381,119 @@ async def simulate_scenario(company_id: str, data: ScenarioRequest, background_t
     if not cashflow_path.exists():
         raise HTTPException(404, "No hay flujo de caja base para simular.")
 
-    # Rate limiting
     _check_rate_limit(f"sim_{company_id}", max_requests=10, window=120)
 
     task_id = str(uuid.uuid4())[:8]
-    _generation_status[task_id] = {"status": "generating", "progress": 0, "error": None}
+    _generation_status[task_id] = {
+        "status": "generating",
+        "progress": 0,
+        "error": None,
+        "step": "Iniciando simulación...",
+        "mode": "local" if data.params else "ai"
+    }
 
-    background_tasks.add_task(_simulate_scenario_task, company_id, data.instruction, task_id)
+    if data.params:
+        # Simulación local rápida (sin LLM)
+        background_tasks.add_task(_simulate_local_task, company_id, data.instruction, data.params, task_id)
+    else:
+        # Simulación con IA (para instrucciones complejas en lenguaje natural)
+        background_tasks.add_task(_simulate_ai_task, company_id, data.instruction, task_id)
+
     return {"task_id": task_id, "status": "generating"}
 
-def _simulate_scenario_task(company_id: str, instruction: str, task_id: str):
+
+def _simulate_local_task(company_id: str, instruction: str, params: dict, task_id: str):
+    """Simulación local rápida sin LLM."""
     try:
         company_dir = DATA_DIR / "companies" / company_id
         cashflow = load_json(company_dir / "cashflow.json")
 
-        _generation_status[task_id]["progress"] = 30
+        _generation_status[task_id]["progress"] = 10
+        _generation_status[task_id]["step"] = "Cargando flujo de caja base..."
+
+        # Ejecutar simulación matemática local
+        scenario_data = simulate_local(cashflow, params, task_id)
+
+        # Guardar escenario
+        scenario_id = str(uuid.uuid4())[:8]
+        scenario_data["id"] = scenario_id
+        scenario_data["company_id"] = company_id
+        scenario_data["instruction"] = instruction
+        scenario_data["simulation_mode"] = "local"
+        scenario_data["created_at"] = datetime.now().isoformat()
+
+        scenarios_dir = DATA_DIR / "scenarios"
+        scenarios_dir.mkdir(parents=True, exist_ok=True)
+        save_json(scenarios_dir / f"{company_id}_{scenario_id}.json", scenario_data)
+
+        _generation_status[task_id] = {
+            "status": "done",
+            "progress": 100,
+            "error": None,
+            "scenario_id": scenario_id,
+            "step": "Simulación completada",
+            "mode": "local"
+        }
+        logger.info(f"Simulación local completada para empresa {company_id}")
+
+        # Limpiar checkpoint
+        checkpoint_path = DATA_DIR / "checkpoints" / f"{task_id}.json"
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+
+    except Exception as e:
+        logger.error(f"Error en simulación local para {company_id}: {type(e).__name__}: {e}")
+        _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e), "step": "Error"}
+
+
+def _simulate_ai_task(company_id: str, instruction: str, task_id: str):
+    """Simulación con IA para instrucciones complejas en lenguaje natural."""
+    try:
+        company_dir = DATA_DIR / "companies" / company_id
+        cashflow = load_json(company_dir / "cashflow.json")
+
+        _generation_status[task_id]["progress"] = 15
+        _generation_status[task_id]["step"] = "Preparando datos para la IA..."
 
         agent = get_agent("scenario_simulator")
         if not agent:
-            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "Agente simulador no configurado"}
+            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "Agente simulador no configurado", "step": "Error"}
             return
 
         system_prompt = get_prompt("scenario_simulator")
         if agent.get("system_prompt"):
             system_prompt = agent["system_prompt"]
 
-        # Limpiar datos internos del cashflow para el prompt
-        cf_clean = {k: v for k, v in cashflow.items() if k not in ("id", "company_id", "created_at", "updated_at")}
+        # OPTIMIZACIÓN: Enviar solo un resumen compacto del cashflow, no el JSON completo
+        months_compact = []
+        for m in cashflow.get("months", []):
+            months_compact.append({
+                "month": m.get("month", ""),
+                "label": m.get("label", ""),
+                "income": m.get("income", {}),
+                "expenses": m.get("expenses", {}),
+                "net_flow": m.get("net_flow", 0),
+                "cumulative_balance": m.get("cumulative_balance", 0)
+            })
+
+        cf_compact = {
+            "months": months_compact,
+            "summary": cashflow.get("summary", {})
+        }
 
         user_message = f"""FLUJO DE CAJA ACTUAL:
-{json.dumps(cf_clean, indent=2, ensure_ascii=False)}
+{json.dumps(cf_compact, ensure_ascii=False)}
 
 INSTRUCCIÓN DEL USUARIO:
 {instruction}
 
 Aplica los cambios solicitados y devuelve el flujo de caja completo actualizado en formato JSON."""
 
-        _generation_status[task_id]["progress"] = 50
+        _generation_status[task_id]["progress"] = 30
+        _generation_status[task_id]["step"] = "La IA está calculando el escenario..."
+
+        # Guardar checkpoint antes de llamar al LLM
+        _save_simulation_checkpoint(task_id, cashflow, 0, len(cashflow.get("months", [])))
 
         response = call_ollama(
             model=agent.get("model", "llama3.1:8b"),
@@ -1265,30 +1503,63 @@ Aplica los cambios solicitados y devuelve el flujo de caja completo actualizado 
             timeout=_get_timeout("simulation")
         )
 
-        _generation_status[task_id]["progress"] = 80
+        _generation_status[task_id]["progress"] = 75
+        _generation_status[task_id]["step"] = "Procesando respuesta de la IA..."
 
         scenario_data = _extract_json_from_llm(response)
         if not scenario_data:
-            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "No se pudo generar la simulación."}
+            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "La IA no pudo generar una simulación válida. Intenta con una instrucción más específica.", "step": "Error"}
             return
+
+        _generation_status[task_id]["progress"] = 85
+        _generation_status[task_id]["step"] = "Normalizando resultados..."
+
+        # Normalizar el resultado
+        scenario_data = normalize_cashflow(scenario_data)
+
+        # Generar alertas si no las tiene
+        if "alerts" not in scenario_data:
+            alerts = []
+            for i, m in enumerate(scenario_data.get("months", [])):
+                if m.get("cumulative_balance", 0) < 0:
+                    alerts.append({
+                        "month": m.get("label", m.get("month", f"Mes {i+1}")),
+                        "type": "danger",
+                        "message": f"Saldo acumulado negativo: ${m['cumulative_balance']:,.0f}"
+                    })
+            scenario_data["alerts"] = alerts
 
         # Guardar escenario
         scenario_id = str(uuid.uuid4())[:8]
         scenario_data["id"] = scenario_id
         scenario_data["company_id"] = company_id
         scenario_data["instruction"] = instruction
+        scenario_data["simulation_mode"] = "ai"
         scenario_data["created_at"] = datetime.now().isoformat()
 
         scenarios_dir = DATA_DIR / "scenarios"
         scenarios_dir.mkdir(parents=True, exist_ok=True)
         save_json(scenarios_dir / f"{company_id}_{scenario_id}.json", scenario_data)
 
-        _generation_status[task_id] = {"status": "done", "progress": 100, "error": None, "scenario_id": scenario_id}
-        logger.info(f"Escenario generado para empresa {company_id}")
+        _generation_status[task_id] = {
+            "status": "done",
+            "progress": 100,
+            "error": None,
+            "scenario_id": scenario_id,
+            "step": "Simulación completada",
+            "mode": "ai"
+        }
+        logger.info(f"Simulación AI completada para empresa {company_id}")
+
+        # Limpiar checkpoint
+        checkpoint_path = DATA_DIR / "checkpoints" / f"{task_id}.json"
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
 
     except Exception as e:
-        logger.error(f"Error en simulación para {company_id}: {type(e).__name__}")
-        _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e)}
+        logger.error(f"Error en simulación AI para {company_id}: {type(e).__name__}: {e}")
+        _generation_status[task_id] = {"status": "error", "progress": 0, "error": str(e), "step": "Error"}
+
 
 @app.get("/api/companies/{company_id}/scenarios")
 async def list_scenarios(company_id: str):
@@ -1331,12 +1602,10 @@ async def chat_simulate(data: ChatMessage):
     if not cashflow_path.exists():
         raise HTTPException(404, "Primero genera un flujo de caja base.")
 
-    # Rate limiting
     _check_rate_limit(f"simchat_{company_id}")
 
     cashflow = load_json(cashflow_path)
 
-    # Cargar o crear sesión de simulación
     session_id = data.session_id or f"sim_{str(uuid.uuid4())[:8]}"
     session_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64]
     session_path = DATA_DIR / "sessions" / f"{company_id}_{session_id}.json"
@@ -1348,7 +1617,6 @@ async def chat_simulate(data: ChatMessage):
 
     system_prompt = get_prompt("scenario_simulator")
 
-    # Incluir flujo de caja como contexto
     cf_summary = f"La empresa tiene un flujo de caja proyectado a {len(cashflow.get('months', []))} meses. "
     summary = cashflow.get("summary", {})
     cf_summary += f"Ingresos totales: ${summary.get('total_income', 0):,.0f}, Gastos totales: ${summary.get('total_expenses', 0):,.0f}, Flujo neto: ${summary.get('net_cashflow', 0):,.0f}."
@@ -1369,7 +1637,6 @@ async def chat_simulate(data: ChatMessage):
     session["messages"].append({"role": "assistant", "content": response, "timestamp": datetime.now().isoformat()})
     save_json(session_path, session)
 
-    # Intentar extraer JSON si la respuesta contiene un flujo de caja actualizado
     scenario_data = _extract_json_from_llm(response)
     has_scenario = scenario_data is not None and "months" in (scenario_data or {})
 
@@ -1406,7 +1673,6 @@ async def export_excel(company_id: str):
     ws = wb.active
     ws.title = "Flujo de Caja"
 
-    # Estilos
     header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
     header_fill = PatternFill(start_color="0D3DA6", end_color="0D3DA6", fill_type="solid")
     money_format = '#,##0'
@@ -1417,7 +1683,6 @@ async def export_excel(company_id: str):
         bottom=Side(style="thin")
     )
 
-    # Título
     ws.merge_cells("A1:H1")
     ws["A1"] = f"Flujo de Caja — {company.get('name', 'Empresa')}"
     ws["A1"].font = Font(name="Calibri", bold=True, size=14, color="0D3DA6")
@@ -1426,7 +1691,6 @@ async def export_excel(company_id: str):
     ws["A2"] = f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
     ws["A2"].font = Font(name="Calibri", size=10, color="666666")
 
-    # Headers
     headers = ["Mes", "Ingresos", "Costos Variables", "Costos Fijos", "Gastos Variables", "Deudas", "Impuestos", "Flujo Neto", "Saldo Acumulado"]
     for col, h in enumerate(headers, 1):
         cell = ws.cell(row=4, column=col, value=h)
@@ -1435,7 +1699,6 @@ async def export_excel(company_id: str):
         cell.alignment = Alignment(horizontal="center")
         cell.border = thin_border
 
-    # Datos
     for i, month in enumerate(cashflow.get("months", []), 5):
         expenses = month.get("expenses", {})
         income = month.get("income", {})
@@ -1451,7 +1714,6 @@ async def export_excel(company_id: str):
         for col in range(1, 10):
             ws.cell(row=i, column=col).border = thin_border
 
-    # Ajustar anchos
     for col in range(1, 10):
         ws.column_dimensions[chr(64 + col)].width = 18
 
@@ -1471,7 +1733,6 @@ async def export_excel(company_id: str):
         ws2.cell(row=i, column=1, value=label).font = Font(bold=True)
         ws2.cell(row=i, column=2, value=value).number_format = money_format
 
-    # Alertas
     alerts = cashflow.get("alerts", [])
     if alerts:
         ws2.cell(row=8, column=1, value="Alertas").font = Font(bold=True, size=12, color="DC2626")
@@ -1479,7 +1740,6 @@ async def export_excel(company_id: str):
             ws2.cell(row=i, column=1, value=alert.get("month", ""))
             ws2.cell(row=i, column=2, value=alert.get("message", ""))
 
-    # Recomendaciones
     recs = cashflow.get("recommendations", [])
     if recs:
         row = 9 + len(alerts) + 1
@@ -1487,7 +1747,6 @@ async def export_excel(company_id: str):
         for i, rec in enumerate(recs, row + 1):
             ws2.cell(row=i, column=1, value=f"• {rec}")
 
-    # Guardar con nombre sanitizado
     exports_dir = DATA_DIR / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
     safe_name = _sanitize_filename(company.get("name", "empresa"))
@@ -1540,6 +1799,137 @@ async def export_csv(company_id: str):
 
     return FileResponse(path=str(filepath), filename=filename, media_type="text/csv")
 
+
+# Exportar escenario específico
+@app.get("/api/scenarios/{scenario_id}/export/csv")
+async def export_scenario_csv(scenario_id: str):
+    scenario_id = _sanitize_id(scenario_id)
+    scenarios_dir = DATA_DIR / "scenarios"
+    scenario_data = None
+    for f in scenarios_dir.glob(f"*_{scenario_id}.json"):
+        scenario_data = load_json(f)
+        break
+    if not scenario_data:
+        raise HTTPException(404, "Escenario no encontrado")
+
+    import csv
+
+    exports_dir = DATA_DIR / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    scenario_name = _sanitize_filename(scenario_data.get("scenario_name", "escenario"))
+    filename = f"escenario_{scenario_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filepath = exports_dir / filename
+
+    with open(str(filepath), "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Mes", "Ingresos", "Costos Variables", "Costos Fijos", "Gastos Variables", "Deudas", "Impuestos", "Flujo Neto", "Saldo Acumulado"])
+        for month in scenario_data.get("months", []):
+            expenses = month.get("expenses", {})
+            income = month.get("income", {})
+            writer.writerow([
+                month.get("label", month.get("month", "")),
+                income.get("total", 0),
+                expenses.get("variable_costs", 0),
+                expenses.get("fixed_costs", 0),
+                expenses.get("variable_expenses", 0),
+                expenses.get("debt_payments", 0),
+                expenses.get("taxes", 0),
+                month.get("net_flow", 0),
+                month.get("cumulative_balance", 0)
+            ])
+
+    return FileResponse(path=str(filepath), filename=filename, media_type="text/csv")
+
+
+@app.get("/api/scenarios/{scenario_id}/export/excel")
+async def export_scenario_excel(scenario_id: str):
+    scenario_id = _sanitize_id(scenario_id)
+    scenarios_dir = DATA_DIR / "scenarios"
+    scenario_data = None
+    for f in scenarios_dir.glob(f"*_{scenario_id}.json"):
+        scenario_data = load_json(f)
+        break
+    if not scenario_data:
+        raise HTTPException(404, "Escenario no encontrado")
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        raise HTTPException(500, "openpyxl no está instalado.")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Escenario"
+
+    header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="0D3DA6", end_color="0D3DA6", fill_type="solid")
+    money_format = '#,##0'
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin")
+    )
+
+    ws.merge_cells("A1:I1")
+    ws["A1"] = scenario_data.get("scenario_name", "Escenario Simulado")
+    ws["A1"].font = Font(name="Calibri", bold=True, size=14, color="0D3DA6")
+
+    ws.merge_cells("A2:I2")
+    ws["A2"] = f"Generado: {scenario_data.get('created_at', datetime.now().isoformat())[:10]}"
+    ws["A2"].font = Font(name="Calibri", size=10, color="666666")
+
+    headers = ["Mes", "Ingresos", "Costos Variables", "Costos Fijos", "Gastos Variables", "Deudas", "Impuestos", "Flujo Neto", "Saldo Acumulado"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=4, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = thin_border
+
+    for i, month in enumerate(scenario_data.get("months", []), 5):
+        expenses = month.get("expenses", {})
+        income = month.get("income", {})
+        ws.cell(row=i, column=1, value=month.get("label", month.get("month", ""))).border = thin_border
+        ws.cell(row=i, column=2, value=income.get("total", 0)).number_format = money_format
+        ws.cell(row=i, column=3, value=expenses.get("variable_costs", 0)).number_format = money_format
+        ws.cell(row=i, column=4, value=expenses.get("fixed_costs", 0)).number_format = money_format
+        ws.cell(row=i, column=5, value=expenses.get("variable_expenses", 0)).number_format = money_format
+        ws.cell(row=i, column=6, value=expenses.get("debt_payments", 0)).number_format = money_format
+        ws.cell(row=i, column=7, value=expenses.get("taxes", 0)).number_format = money_format
+        ws.cell(row=i, column=8, value=month.get("net_flow", 0)).number_format = money_format
+        ws.cell(row=i, column=9, value=month.get("cumulative_balance", 0)).number_format = money_format
+        for col in range(1, 10):
+            ws.cell(row=i, column=col).border = thin_border
+
+    for col in range(1, 10):
+        ws.column_dimensions[chr(64 + col)].width = 18
+
+    # Hoja de cambios aplicados
+    ws2 = wb.create_sheet("Cambios")
+    ws2["A1"] = "Cambios Aplicados"
+    ws2["A1"].font = Font(name="Calibri", bold=True, size=14, color="0D3DA6")
+    for i, change in enumerate(scenario_data.get("changes_applied", []), 3):
+        ws2.cell(row=i, column=1, value=f"• {change}")
+
+    impact = scenario_data.get("impact_summary", {})
+    if isinstance(impact, dict):
+        ws2.cell(row=len(scenario_data.get("changes_applied", [])) + 5, column=1, value="Impacto").font = Font(bold=True)
+        ws2.cell(row=len(scenario_data.get("changes_applied", [])) + 6, column=1, value=impact.get("description", ""))
+
+    exports_dir = DATA_DIR / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    scenario_name = _sanitize_filename(scenario_data.get("scenario_name", "escenario"))
+    filename = f"escenario_{scenario_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filepath = exports_dir / filename
+    wb.save(str(filepath))
+
+    return FileResponse(
+        path=str(filepath),
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints: Agentes
 # ---------------------------------------------------------------------------
@@ -1569,7 +1959,6 @@ async def update_agent(agent_id: str, config: AgentConfigUpdate):
             agents_data["agents"][i]["updated_at"] = datetime.now().isoformat()
             save_json(DATA_DIR / "agents" / "agents.json", agents_data)
 
-            # Verificar modelo
             model = config.model or agents_data["agents"][i].get("model")
             if model and not _is_model_available(model):
                 _start_pull_background(model)
@@ -1633,9 +2022,8 @@ else:
 
 @app.on_event("startup")
 async def startup():
-    for d in ["agents", "prompts/system", "sessions", "exports", "companies", "cashflows", "scenarios"]:
+    for d in ["agents", "prompts/system", "sessions", "exports", "companies", "cashflows", "scenarios", "checkpoints"]:
         (DATA_DIR / d).mkdir(parents=True, exist_ok=True)
-    # Copiar defaults si no existen
     agents_dst = DATA_DIR / "agents" / "agents.json"
     if not agents_dst.exists():
         agents_src = DEFAULTS_DIR / "agents.json"
@@ -1648,9 +2036,8 @@ async def startup():
             dst = prompts_dst / f.name
             if not dst.exists():
                 shutil.copy2(str(f), str(dst))
-    # Intentar asegurar que Ollama esté corriendo
     threading.Thread(target=ensure_ollama_running, daemon=True).start()
-    logger.info(f"CCS Cashflow Assistant v0.2.0 iniciado en puerto {PORT} ({sys.platform})")
+    logger.info(f"CCS Cashflow Assistant v0.3.0 iniciado en puerto {PORT} ({sys.platform})")
 
 @app.get("/")
 async def root():
@@ -1660,16 +2047,10 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
 
-    # En Windows, asyncio necesita ProactorEventLoop para sockets y subprocesos.
-    # Esto evita el error 'NotImplementedError' al usar asyncio en Windows.
     if sys.platform == "win32":
         import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-    # Siempre escuchar en 127.0.0.1 para que la URL emitida por uvicorn
-    # coincida exactamente con lo que Pinokio captura via el evento on/regex
-    # y luego usa en browser.open. Usar 0.0.0.0 causa que Pinokio capture
-    # "http://0.0.0.0:PORT" que no es accesible en Windows.
     host = "127.0.0.1"
     print(f"http://{host}:{PORT}")
     uvicorn.run(app, host=host, port=PORT, log_level="info")

@@ -137,7 +137,7 @@
       "method": "shell.run",
       "params": {
         "message": [
-          "venv\\Scripts\\python.exe -c \"import os; [os.makedirs(d, exist_ok=True) for d in ['data/agents','data/prompts/system','data/sessions','data/exports','data/companies','data/cashflows','data/scenarios']]; print('DIRS_OK')\"",
+          "venv\\Scripts\\python.exe -c \"import os; [os.makedirs(d, exist_ok=True) for d in ['data/agents','data/prompts/system','data/sessions','data/exports','data/companies','data/cashflows','data/scenarios','data/checkpoints']]; print('DIRS_OK')\"",
           "venv\\Scripts\\python.exe -c \"import os, shutil; src='defaults/agents.json'; dst='data/agents/agents.json'; shutil.copy2(src, dst) if not os.path.exists(dst) else None; print('AGENTS_OK')\"",
           "venv\\Scripts\\python.exe -c \"import os, shutil, glob; [shutil.copy2(f, 'data/prompts/system/') for f in glob.glob('defaults/prompts/*.md') if not os.path.exists('data/prompts/system/' + os.path.basename(f))]; print('PROMPTS_OK')\""
         ]
@@ -148,7 +148,7 @@
       "method": "shell.run",
       "params": {
         "message": [
-          "venv/bin/python -c \"import os; [os.makedirs(d, exist_ok=True) for d in ['data/agents','data/prompts/system','data/sessions','data/exports','data/companies','data/cashflows','data/scenarios']]; print('DIRS_OK')\"",
+          "venv/bin/python -c \"import os; [os.makedirs(d, exist_ok=True) for d in ['data/agents','data/prompts/system','data/sessions','data/exports','data/companies','data/cashflows','data/scenarios','data/checkpoints']]; print('DIRS_OK')\"",
           "venv/bin/python -c \"import os, shutil; src='defaults/agents.json'; dst='data/agents/agents.json'; shutil.copy2(src, dst) if not os.path.exists(dst) else None; print('AGENTS_OK')\"",
           "venv/bin/python -c \"import os, shutil, glob; [shutil.copy2(f, 'data/prompts/system/') for f in glob.glob('defaults/prompts/*.md') if not os.path.exists('data/prompts/system/' + os.path.basename(f))]; print('PROMPTS_OK')\""
         ]
