@@ -252,6 +252,11 @@
       background: rgba(58,109,222,0.08); border: 1px solid rgba(58,109,222,0.25);
       color: var(--ccs-azul); align-self: center; text-align: center; font-size: 12px; max-width: 90%;
     }
+    .chat-message.assistant strong { font-weight: 700; color: var(--ccs-azul-oscuro); }
+    .chat-message.assistant em { font-style: italic; }
+    .chat-message.assistant ul, .chat-message.assistant ol { margin: 6px 0; padding-left: 18px; }
+    .chat-message.assistant li { margin-bottom: 3px; }
+    .chat-message.assistant br + br { display: block; margin-top: 6px; content: ''; }
     .chat-input-area {
       display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); background: #FFFFFF;
     }
@@ -1286,7 +1291,7 @@
               .then(function(sessionData) {
                 var messages = sessionData.messages || [];
                 messages.forEach(function(m) {
-                  msgs.innerHTML += '<div class="chat-message ' + m.role + '">' + escapeHtml(safeDisplayValue(m.content)) + '</div>';
+                  msgs.innerHTML += '<div class="chat-message ' + m.role + '">' + (m.role === 'assistant' ? renderMarkdown(safeDisplayValue(m.content)) : escapeHtml(safeDisplayValue(m.content))) + '</div>';
                 });
                 msgs.scrollTop = msgs.scrollHeight;
               })
@@ -1318,7 +1323,7 @@
         currentSessionId = data.session_id;
         var msgs = document.getElementById('interviewMessages');
         msgs.innerHTML += '<div class="chat-message user">Hola, quiero crear un flujo de caja para mi empresa. ¿Por d&oacute;nde empezamos?</div>';
-        msgs.innerHTML += '<div class="chat-message assistant">' + escapeHtml(data.response) + '</div>';
+        msgs.innerHTML += '<div class="chat-message assistant">' + renderMarkdown(data.response) + '</div>';
         msgs.scrollTop = msgs.scrollHeight;
       })
       .catch(function(e) {
@@ -1360,7 +1365,7 @@
         currentSessionId = data.session_id;
         var typing = document.getElementById('typingIndicator');
         if (typing) typing.remove();
-        msgs.innerHTML += '<div class="chat-message assistant">' + escapeHtml(safeDisplayValue(data.response)) + '</div>';
+        msgs.innerHTML += '<div class="chat-message assistant">' + renderMarkdown(safeDisplayValue(data.response)) + '</div>';
         msgs.scrollTop = msgs.scrollHeight;
         document.getElementById('btnSendInterview').disabled = false;
         input.disabled = false;
@@ -1403,16 +1408,30 @@
             if (result.status === 'done') {
               btn.innerHTML = '<i class="fa-solid fa-check"></i> Flujo generado';
               btn.disabled = false;
-              showNotification('Flujo de caja generado correctamente. Redirigiendo al dashboard...', 'success');
+              var monthsMsg = result.months_generated ? ' (' + result.months_generated + ' meses)' : '';
+              showNotification('Flujo de caja generado correctamente' + monthsMsg + '. Redirigiendo al dashboard...', 'success');
               loadCompanies();
-              fetch('/api/companies/' + currentCompanyId + '/cashflow')
-                .then(function(r) { return r.json(); })
-                .then(function(cf) {
-                  currentCashflow = cf;
-                  navigateTo('dashboard');
-                });
+              // Esperar un momento para asegurar que el archivo se guardó
+              setTimeout(function() {
+                fetch('/api/companies/' + currentCompanyId + '/cashflow')
+                  .then(function(r) {
+                    if (!r.ok) throw new Error('No se pudo cargar el flujo de caja');
+                    return r.json();
+                  })
+                  .then(function(cf) {
+                    if (!cf || !cf.months || cf.months.length === 0) {
+                      showNotification('El flujo de caja se generó pero no tiene datos de meses. Intenta generar de nuevo.', 'error');
+                      return;
+                    }
+                    currentCashflow = cf;
+                    navigateTo('dashboard');
+                  })
+                  .catch(function(err) {
+                    showNotification('Error al cargar el flujo de caja: ' + safeDisplayValue(err.message), 'error');
+                  });
+              }, 500);
             } else {
-              btn.innerHTML = '<i class="fa-solid fa-exclamation-triangle"></i> Error';
+              btn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> Generar Flujo de Caja';
               btn.disabled = false;
               showNotification('Error al generar: ' + safeDisplayValue(result.error || 'Error desconocido'), 'error');
             }
@@ -2331,6 +2350,34 @@
       var div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+    }
+
+    function renderMarkdown(text) {
+      // Renderiza markdown básico de forma segura (el texto ya debe estar escaped)
+      if (!text) return '';
+      // Primero escapar HTML para seguridad
+      var safe = escapeHtml(text);
+      // Negrita: **texto** o __texto__
+      safe = safe.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+      safe = safe.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
+      // Cursiva: *texto* o _texto_
+      safe = safe.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+      // Cursiva con _ solo si está rodeada de espacios o inicio/fin
+      safe = safe.replace(/(^|\s)_([^_]+?)_(\s|$)/g, '$1<em>$2</em>$3');
+      // Listas con viñetas: líneas que empiezan con * o -
+      safe = safe.replace(/^[\*\-]\s+(.+)$/gm, '<li>$1</li>');
+      safe = safe.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul style="margin:8px 0;padding-left:20px">$1</ul>');
+      // Listas numeradas: líneas que empiezan con 1. 2. etc.
+      safe = safe.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
+      // Encabezados: ## Título
+      safe = safe.replace(/^###\s+(.+)$/gm, '<strong style="font-size:13px;display:block;margin:8px 0 4px">$1</strong>');
+      safe = safe.replace(/^##\s+(.+)$/gm, '<strong style="font-size:14px;display:block;margin:10px 0 4px">$1</strong>');
+      safe = safe.replace(/^#\s+(.+)$/gm, '<strong style="font-size:15px;display:block;margin:12px 0 6px">$1</strong>');
+      // Saltos de línea
+      safe = safe.replace(/\n/g, '<br>');
+      // Limpiar múltiples <br> seguidos
+      safe = safe.replace(/(<br>){3,}/g, '<br><br>');
+      return safe;
     }
 
     function showNotification(message, type) {

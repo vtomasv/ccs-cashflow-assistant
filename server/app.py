@@ -534,12 +534,109 @@ def _normalize_month(m: dict) -> dict:
         "cumulative_balance": 0
     }
 
+def _rescue_cashflow_structure(data: dict) -> dict:
+    """Busca la estructura de meses en cualquier nivel del JSON del LLM.
+    Los LLMs a veces envuelven el resultado en campos extra como 'data', 'cashflow',
+    'flujo_de_caja', 'result', etc. Esta función busca recursivamente."""
+    if not isinstance(data, dict):
+        return data
+    
+    # Si ya tiene months como lista con al menos un elemento, está bien
+    months = data.get("months", None)
+    if isinstance(months, list) and len(months) > 0:
+        # Verificar que los elementos parecen meses (tienen income o expenses)
+        first = months[0] if months else {}
+        if isinstance(first, dict) and ("income" in first or "expenses" in first or "sales" in first or "ingresos" in first):
+            return data
+    
+    # Buscar en campos comunes donde el LLM podría haber anidado los datos
+    candidate_keys = ["data", "cashflow", "flujo_de_caja", "result", "resultado",
+                      "flujo", "cash_flow", "projection", "proyeccion"]
+    for key in candidate_keys:
+        if key in data and isinstance(data[key], dict):
+            inner = data[key]
+            if isinstance(inner.get("months"), list) and len(inner["months"]) > 0:
+                # Mover campos del wrapper al nivel superior
+                for k, v in inner.items():
+                    data[k] = v
+                return data
+    
+    # Buscar cualquier campo que sea una lista de dicts con estructura de mes
+    for key, val in data.items():
+        if key == "months":
+            continue
+        if isinstance(val, list) and len(val) > 0:
+            first = val[0] if val else {}
+            if isinstance(first, dict) and ("income" in first or "expenses" in first or
+                                            "sales" in first or "ingresos" in first or
+                                            "month" in first or "mes" in first):
+                data["months"] = val
+                return data
+    
+    # Buscar meses con nombres en español
+    if "meses" in data and isinstance(data["meses"], list):
+        data["months"] = data["meses"]
+        return data
+    
+    return data
+
+
+def _normalize_month_from_spanish(m: dict) -> dict:
+    """Intenta normalizar un mes que puede venir con campos en español."""
+    if not isinstance(m, dict):
+        return m
+    
+    # Mapear campos en español a inglés
+    if "ingresos" in m and "income" not in m:
+        inc = m["ingresos"]
+        if isinstance(inc, dict):
+            m["income"] = {
+                "sales": _to_num(inc.get("ventas", inc.get("sales", 0))),
+                "other_income": _to_num(inc.get("otros_ingresos", inc.get("otros", inc.get("other_income", 0)))),
+            }
+        elif isinstance(inc, (int, float, str)):
+            m["income"] = {"sales": _to_num(inc), "other_income": 0}
+    
+    if "gastos" in m and "expenses" not in m:
+        exp = m["gastos"]
+        if isinstance(exp, dict):
+            m["expenses"] = {
+                "variable_costs": _to_num(exp.get("costos_variables", exp.get("variable_costs", 0))),
+                "fixed_costs": _to_num(exp.get("costos_fijos", exp.get("fixed_costs", 0))),
+                "variable_expenses": _to_num(exp.get("gastos_variables", exp.get("variable_expenses", 0))),
+                "debt_payments": _to_num(exp.get("deudas", exp.get("debt_payments", exp.get("pagos_deuda", 0)))),
+                "taxes": _to_num(exp.get("impuestos", exp.get("taxes", 0))),
+                "investments": _to_num(exp.get("inversiones", exp.get("investments", 0))),
+            }
+        elif isinstance(exp, (int, float, str)):
+            m["expenses"] = {"variable_costs": _to_num(exp), "fixed_costs": 0, "variable_expenses": 0, "debt_payments": 0, "taxes": 0, "investments": 0}
+    
+    if "mes" in m and "month" not in m:
+        m["month"] = m["mes"]
+    if "etiqueta" in m and "label" not in m:
+        m["label"] = m["etiqueta"]
+    
+    # Si tiene ventas a nivel raíz (sin income wrapper)
+    if "sales" in m and "income" not in m:
+        m["income"] = {"sales": _to_num(m["sales"]), "other_income": _to_num(m.get("other_income", 0))}
+    if "ventas" in m and "income" not in m:
+        m["income"] = {"sales": _to_num(m["ventas"]), "other_income": _to_num(m.get("otros_ingresos", 0))}
+    
+    return m
+
+
 def normalize_cashflow(data: dict) -> dict:
     """Normaliza un flujo de caja completo: recalcula totales, saldos acumulados y summary."""
+    # Primero intentar rescatar la estructura si el LLM la anidó
+    data = _rescue_cashflow_structure(data)
+    
     months = data.get("months", [])
     if not isinstance(months, list):
         months = []
     months = months[:MAX_MONTHS]
+    
+    # Normalizar meses que pueden venir en español
+    months = [_normalize_month_from_spanish(m) for m in months if isinstance(m, dict)]
 
     normalized_months = []
     cumulative = 0.0
@@ -1250,24 +1347,41 @@ Genera el JSON del flujo de caja siguiendo exactamente el formato indicado en tu
 
         cashflow_data = _extract_json_from_llm(response)
         if not cashflow_data:
-            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "No se pudo generar el flujo de caja. Intenta proporcionar más información.", "step": "Error"}
+            # Intentar extraer datos de la respuesta como texto estructurado
+            logger.warning(f"No se pudo extraer JSON del LLM para {company_id}. Respuesta: {response[:200]}")
+            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "No se pudo generar el flujo de caja. La IA no devolvió datos en formato correcto. Intenta proporcionar más información en la entrevista.", "step": "Error"}
             return
 
         _generation_status[task_id]["progress"] = 85
         _generation_status[task_id]["step"] = "Normalizando y validando datos..."
 
         cashflow_data = normalize_cashflow(cashflow_data)
+        
+        # Validar que se generaron meses
+        num_months = len(cashflow_data.get("months", []))
+        if num_months == 0:
+            logger.warning(f"Cashflow generado sin meses para {company_id}. JSON extraído: {json.dumps(cashflow_data, default=str)[:500]}")
+            _generation_status[task_id] = {"status": "error", "progress": 0, "error": "La IA generó un flujo de caja vacío (0 meses). Esto puede ocurrir si no hay suficiente información. Vuelve a la entrevista y proporciona más detalles sobre ingresos y gastos mensuales.", "step": "Error"}
+            return
+        
+        # Validar que los totales no sean todos 0 (indicaría datos corruptos)
+        total_income = cashflow_data.get("summary", {}).get("total_income", 0)
+        total_expenses = cashflow_data.get("summary", {}).get("total_expenses", 0)
+        if total_income == 0 and total_expenses == 0 and num_months > 0:
+            logger.warning(f"Cashflow con {num_months} meses pero totales en 0 para {company_id}")
+            # No es un error fatal, pero loguear para debug
+
         cashflow_data["id"] = str(uuid.uuid4())[:8]
         cashflow_data["company_id"] = company_id
         cashflow_data["created_at"] = datetime.now().isoformat()
         save_json(company_dir / "cashflow.json", cashflow_data)
-        logger.info(f"Flujo de caja generado: {len(cashflow_data.get('months', []))} meses para empresa {company_id}")
+        logger.info(f"Flujo de caja generado: {num_months} meses, ingresos={total_income:,.0f}, gastos={total_expenses:,.0f} para empresa {company_id}")
 
         company["status"] = "complete"
         company["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "company.json", company)
 
-        _generation_status[task_id] = {"status": "done", "progress": 100, "error": None, "step": "Completado"}
+        _generation_status[task_id] = {"status": "done", "progress": 100, "error": None, "step": "Completado", "months_generated": num_months}
 
     except Exception as e:
         logger.error(f"Error generando flujo de caja para {company_id}: {type(e).__name__}")
