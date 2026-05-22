@@ -2127,6 +2127,27 @@ async def get_session(company_id: str, session_id: str):
     }
 
 # ---------------------------------------------------------------------------
+# Registrar Router Avanzado (Motor Financiero V2)
+# ---------------------------------------------------------------------------
+try:
+    from advanced_endpoints import router as advanced_router, init_router
+    init_router(
+        data_dir=DATA_DIR,
+        save_json_fn=save_json,
+        load_json_fn=load_json,
+        call_ollama_fn=call_ollama,
+        call_ollama_chat_fn=call_ollama_chat,
+        get_agent_fn=get_agent,
+        get_prompt_fn=get_prompt,
+        extract_json_fn=_extract_json_from_llm,
+        get_timeout_fn=_get_timeout,
+    )
+    app.include_router(advanced_router)
+    logger.info("Router avanzado V2 registrado correctamente")
+except Exception as e:
+    logger.warning(f"No se pudo registrar el router avanzado: {e}")
+
+# ---------------------------------------------------------------------------
 # Montar archivos estáticos y arrancar
 # ---------------------------------------------------------------------------
 if APP_DIR.exists():
@@ -2151,7 +2172,7 @@ async def startup():
             if not dst.exists():
                 shutil.copy2(str(f), str(dst))
     threading.Thread(target=ensure_ollama_running, daemon=True).start()
-    logger.info(f"CCS Cashflow Assistant v0.3.0 iniciado en puerto {PORT} ({sys.platform})")
+    logger.info(f"CCS Cashflow Assistant v2.0.0 iniciado en puerto {PORT} ({sys.platform})")
 
 @app.get("/")
 async def root():
