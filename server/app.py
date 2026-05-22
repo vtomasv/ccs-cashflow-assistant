@@ -398,6 +398,12 @@ class CompanyCreate(BaseModel):
     name: str
     sector: str = ""
     description: str = ""
+    size: str = ""
+    country: str = "Chile"
+    currency: str = "CLP"
+    initial_cash: float = 0
+    employees: int = 0
+    age: str = ""
 
     @validator("name")
     def validate_name(cls, v):
@@ -1175,6 +1181,12 @@ async def create_company(data: CompanyCreate):
         "name": data.name,
         "sector": data.sector,
         "description": data.description,
+        "size": data.size,
+        "country": data.country,
+        "currency": data.currency,
+        "initial_cash": data.initial_cash,
+        "employees": data.employees,
+        "age": data.age,
         "status": "pending",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat()

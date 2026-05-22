@@ -1,94 +1,102 @@
 /**
- * CCS Cashflow Assistant v2 — Frontend Application
- * Motor Financiero Modular con Simulación Monte Carlo
+ * CCS Cashflow Assistant v2.1 — Frontend Application
+ * Motor Financiero Modular con estilos CCS Brand
  */
 
 // ============================================================================
 // Estado Global
 // ============================================================================
-const API = '';  // Same origin
+const API = '';
 let state = {
   companyId: null,
   companyName: '',
   companySector: '',
   sessionId: '',
   cashflow: null,
+  companies: [],
   charts: {},
   generationTaskId: null,
   mcTaskId: null,
+  currentPage: 'home',
+  wizardStep: 1,
 };
 
 // ============================================================================
 // Inicialización
 // ============================================================================
 document.addEventListener('DOMContentLoaded', () => {
-  checkReadiness();
+  checkOllama();
   loadCompanies();
 });
 
-async function checkReadiness() {
-  const overlay = document.getElementById('readiness-overlay');
-  const msg = document.getElementById('readiness-msg');
-  const bar = document.getElementById('readiness-bar');
-
+async function checkOllama() {
   try {
     const r = await fetch(`${API}/api/readiness`);
     const data = await r.json();
+    const dot = document.getElementById('ollamaDot');
+    const text = document.getElementById('ollamaStatusText');
 
     if (data.ready) {
-      overlay.classList.add('hidden');
-      document.getElementById('ollama-dot').className = 'status-dot ok';
-      document.getElementById('ollama-label').textContent = `Ollama OK (${data.models_count} modelos)`;
-      return;
+      dot.className = 'status-dot online';
+      text.textContent = `Ollama OK (${data.models_count} modelos)`;
+      showReadinessBanner(true);
+    } else {
+      dot.className = 'status-dot loading';
+      text.textContent = 'Preparando...';
+      showReadinessBanner(false, data.issues ? data.issues[0]?.message : 'Preparando modelos...');
+      pollOllama();
     }
-
-    // Not ready yet
-    if (data.issues && data.issues.length > 0) {
-      msg.textContent = data.issues[0].message;
-    }
-    bar.style.width = '30%';
-
-    // Poll until ready
-    const poll = setInterval(async () => {
-      try {
-        const r2 = await fetch(`${API}/api/readiness`);
-        const d2 = await r2.json();
-        if (d2.ready) {
-          clearInterval(poll);
-          overlay.classList.add('hidden');
-          document.getElementById('ollama-dot').className = 'status-dot ok';
-          document.getElementById('ollama-label').textContent = `Ollama OK (${d2.models_count} modelos)`;
-        } else {
-          if (d2.active_pulls && d2.active_pulls.length > 0) {
-            const p = d2.active_pulls[0];
-            msg.textContent = `Descargando modelo ${p.model}... ${p.progress}%`;
-            bar.style.width = `${Math.max(30, p.progress)}%`;
-          }
-        }
-      } catch(e) {}
-    }, 3000);
   } catch(e) {
-    msg.textContent = 'Error conectando con el servidor...';
-    document.getElementById('ollama-dot').className = 'status-dot err';
-    document.getElementById('ollama-label').textContent = 'Desconectado';
-    setTimeout(() => { overlay.classList.add('hidden'); }, 3000);
+    document.getElementById('ollamaDot').className = 'status-dot';
+    document.getElementById('ollamaStatusText').textContent = 'Desconectado';
+    showReadinessBanner(false, 'No se pudo conectar con el servidor');
+  }
+}
+
+function pollOllama() {
+  const poll = setInterval(async () => {
+    try {
+      const r = await fetch(`${API}/api/readiness`);
+      const d = await r.json();
+      if (d.ready) {
+        clearInterval(poll);
+        document.getElementById('ollamaDot').className = 'status-dot online';
+        document.getElementById('ollamaStatusText').textContent = `Ollama OK (${d.models_count} modelos)`;
+        document.getElementById('readinessBanner').innerHTML = '';
+      }
+    } catch(e) {}
+  }, 4000);
+}
+
+function showReadinessBanner(ready, message) {
+  const el = document.getElementById('readinessBanner');
+  if (ready) {
+    el.innerHTML = '';
+  } else {
+    el.innerHTML = `<div class="readiness-banner not-ready">
+      <div style="font-size:20px;">&#9888;&#65039;</div>
+      <div><div style="font-weight:700;">Sistema preparándose</div><div style="font-size:12px;opacity:0.8;">${message || 'Verificando modelos de IA...'}</div></div>
+    </div>`;
   }
 }
 
 // ============================================================================
 // Navegación
 // ============================================================================
-function switchPage(page) {
+function navigateTo(page) {
+  state.currentPage = page;
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById(`page-${page}`).classList.add('active');
 
-  const navItems = document.querySelectorAll('.nav-item');
-  navItems.forEach(n => {
-    if (n.getAttribute('onclick') === `switchPage('${page}')`) n.classList.add('active');
-  });
+  const pageEl = document.getElementById(`page-${page}`);
+  if (pageEl) pageEl.classList.add('active');
+
+  const navEl = document.getElementById(`nav-${page}`);
+  if (navEl) navEl.classList.add('active');
 
   const titles = {
+    home: 'Inicio',
+    companies: 'Mis Empresas',
     interview: 'Entrevista Financiera',
     dashboard: 'Dashboard — Flujo de Caja',
     simulation: 'Simulación Interactiva',
@@ -97,12 +105,13 @@ function switchPage(page) {
     metrics: 'Métricas Financieras',
     settings: 'Configuración',
   };
-  document.getElementById('page-title').textContent = titles[page] || page;
+  document.getElementById('pageTitle').textContent = titles[page] || page;
 
   // Load data for specific pages
   if (page === 'dashboard' && state.companyId) loadCashflow();
-  if (page === 'scenarios' && state.companyId) { loadScenarios(); loadVersions(); }
+  if (page === 'scenarios' && state.companyId) loadVersions();
   if (page === 'metrics' && state.companyId) loadMetrics();
+  if (page === 'simulation' && state.companyId) renderSimulationControls();
   if (page === 'settings') loadSettings();
 }
 
@@ -113,30 +122,86 @@ async function loadCompanies() {
   try {
     const r = await fetch(`${API}/api/companies`);
     const data = await r.json();
-    const select = document.getElementById('company-select');
-    select.innerHTML = '<option value="">Seleccionar...</option>';
-    (data.companies || []).forEach(c => {
-      select.innerHTML += `<option value="${c.id}">${c.name}</option>`;
-    });
+    state.companies = data.companies || [];
+    document.getElementById('companiesBadge').textContent = state.companies.length;
+    renderCompaniesGrid();
+    renderHomeCompanies();
+
     // Auto-select if only one
-    if (data.companies && data.companies.length === 1) {
-      select.value = data.companies[0].id;
-      selectCompany(data.companies[0].id);
+    if (state.companies.length === 1 && !state.companyId) {
+      selectCompany(state.companies[0].id);
     }
   } catch(e) { console.error('Error loading companies:', e); }
+}
+
+function renderCompaniesGrid() {
+  const grid = document.getElementById('companiesGrid');
+  if (!state.companies.length) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
+      <div class="empty-icon"><i class="fas fa-building"></i></div>
+      <div class="empty-title">No hay empresas registradas</div>
+      <div class="empty-desc">Crea tu primera empresa para comenzar a proyectar flujos de caja</div>
+      <button class="btn btn-primary" onclick="openModal('newCompanyModal')"><i class="fas fa-plus"></i> Crear Empresa</button>
+    </div>`;
+    return;
+  }
+
+  grid.innerHTML = state.companies.map(c => {
+    const initial = (c.name || '?')[0].toUpperCase();
+    const statusClass = c.status === 'complete' ? 'status-complete' : c.status === 'interviewing' ? 'status-interviewing' : 'status-pending';
+    const statusText = c.status === 'complete' ? 'Cashflow listo' : c.status === 'interviewing' ? 'En entrevista' : 'Pendiente';
+    const selected = c.id === state.companyId ? 'selected' : '';
+    return `<div class="company-card ${selected}" onclick="selectCompany('${c.id}')">
+      <div class="company-avatar">${initial}</div>
+      <div class="company-name">${c.name}</div>
+      <div class="company-sector">${c.sector || 'Sin sector'}</div>
+      <div class="company-status ${statusClass}">${statusText}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderHomeCompanies() {
+  const el = document.getElementById('homeCompaniesList');
+  if (!state.companies.length) { el.innerHTML = ''; return; }
+
+  el.innerHTML = `<div class="card">
+    <div class="card-header">
+      <div><div class="card-title">Tus Empresas</div><div class="card-subtitle">Selecciona una empresa para continuar</div></div>
+      <button class="btn btn-sm btn-secondary" onclick="navigateTo('companies')">Ver todas</button>
+    </div>
+    <div class="grid-3">${state.companies.slice(0, 3).map(c => {
+      const initial = (c.name || '?')[0].toUpperCase();
+      const statusClass = c.status === 'complete' ? 'status-complete' : c.status === 'interviewing' ? 'status-interviewing' : 'status-pending';
+      const statusText = c.status === 'complete' ? 'Cashflow listo' : c.status === 'interviewing' ? 'En entrevista' : 'Pendiente';
+      return `<div class="company-card" onclick="selectCompany('${c.id}')">
+        <div class="company-avatar">${initial}</div>
+        <div class="company-name">${c.name}</div>
+        <div class="company-sector">${c.sector || 'Sin sector'}</div>
+        <div class="company-status ${statusClass}">${statusText}</div>
+      </div>`;
+    }).join('')}</div>
+  </div>`;
 }
 
 async function selectCompany(id) {
   if (!id) return;
   state.companyId = id;
   state.sessionId = '';
+
+  showGlobalLoading('Cargando empresa...');
+
   try {
     const r = await fetch(`${API}/api/companies/${id}`);
     const company = await r.json();
     state.companyName = company.name;
     state.companySector = company.sector;
 
-    // Load sessions to restore chat
+    // Show company tools in sidebar
+    document.getElementById('companyToolsSection').style.display = 'block';
+    document.getElementById('activeCompanyLabel').textContent = company.name;
+    document.getElementById('interviewCompanyName').textContent = `— ${company.name}`;
+
+    // Load sessions
     const sr = await fetch(`${API}/api/companies/${id}/sessions`);
     const sessions = await sr.json();
     const interviewSessions = (sessions.sessions || []).filter(s => s.type === 'interview' || s.type === 'interview_v2');
@@ -146,30 +211,42 @@ async function selectCompany(id) {
       state.sessionId = lastSession.id;
       await loadSession(id, lastSession.id);
     } else {
-      // Start new interview
-      const chatDiv = document.getElementById('chat-messages');
-      chatDiv.innerHTML = `<div class="chat-msg system">Bienvenido. Soy tu analista financiero. Vamos a construir el modelo de flujo de caja para <strong>${company.name}</strong>. Cuéntame sobre tu negocio.</div>`;
+      const chatDiv = document.getElementById('chatMessages');
+      chatDiv.innerHTML = `<div class="chat-message system-msg">Bienvenido. Soy tu analista financiero. Vamos a construir el modelo de flujo de caja para <strong>${company.name}</strong>. Cuéntame sobre tu negocio.</div>`;
     }
 
-    // Show generate button if company has enough data
+    // Enable chat
+    document.getElementById('chatInput').disabled = false;
+    document.getElementById('btnSendChat').disabled = false;
+
+    // Show generate button if has enough data
     if (company.status === 'interviewing' || company.status === 'complete') {
-      document.getElementById('btn-generate').style.display = 'flex';
+      document.getElementById('btnGenerateCashflow').style.display = 'inline-flex';
     }
 
     // Load cashflow if exists
     if (company.status === 'complete') {
-      loadCashflow();
+      await loadCashflow();
     }
 
     updateInterviewTopics();
-  } catch(e) { console.error('Error selecting company:', e); }
+    renderCompaniesGrid();
+    hideGlobalLoading();
+
+    // Navigate to interview
+    navigateTo('interview');
+    notify('success', `Empresa "${company.name}" seleccionada`);
+  } catch(e) {
+    hideGlobalLoading();
+    notify('error', 'Error cargando la empresa');
+  }
 }
 
 async function loadSession(companyId, sessionId) {
   try {
     const r = await fetch(`${API}/api/companies/${companyId}/sessions/${sessionId}`);
     const session = await r.json();
-    const chatDiv = document.getElementById('chat-messages');
+    const chatDiv = document.getElementById('chatMessages');
     chatDiv.innerHTML = '';
     (session.messages || []).forEach(msg => {
       addChatBubble(msg.role, msg.content);
@@ -178,42 +255,149 @@ async function loadSession(companyId, sessionId) {
   } catch(e) {}
 }
 
-function openModal(id) { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+// ============================================================================
+// Wizard de Creación de Empresa
+// ============================================================================
+function wizardNext(step) {
+  if (step === 1) {
+    const name = document.getElementById('companyName').value.trim();
+    const sector = document.getElementById('companySector').value;
+    if (!name) { notify('error', 'Ingresa el nombre de la empresa'); return; }
+    if (!sector) { notify('error', 'Selecciona un sector'); return; }
+  }
+
+  if (step === 2) {
+    renderCompanySummary();
+  }
+
+  // Update wizard UI
+  document.getElementById(`wizardStep${step}`).style.display = 'none';
+  document.getElementById(`wizardStep${step + 1}`).style.display = 'block';
+  document.getElementById(`ws-${step}`).className = 'wizard-step done';
+  document.getElementById(`wc-${step}`).className = 'wizard-connector done';
+  document.getElementById(`ws-${step + 1}`).className = 'wizard-step active';
+  state.wizardStep = step + 1;
+}
+
+function wizardBack(step) {
+  document.getElementById(`wizardStep${step}`).style.display = 'none';
+  document.getElementById(`wizardStep${step - 1}`).style.display = 'block';
+  document.getElementById(`ws-${step}`).className = 'wizard-step';
+  document.getElementById(`wc-${step - 1}`).className = 'wizard-connector';
+  document.getElementById(`ws-${step - 1}`).className = 'wizard-step active';
+  state.wizardStep = step - 1;
+}
+
+function renderCompanySummary() {
+  const name = document.getElementById('companyName').value.trim();
+  const sector = document.getElementById('companySector').value;
+  const size = document.getElementById('companySize').value;
+  const country = document.getElementById('companyCountry').value;
+  const currency = document.getElementById('companyCurrency').value;
+  const cash = document.getElementById('companyInitialCash').value;
+  const employees = document.getElementById('companyEmployees').value;
+  const age = document.getElementById('companyAge').value;
+
+  const sizeLabels = { micro: 'Micro (1-9)', pequena: 'Pequeña (10-49)', mediana: 'Mediana (50-199)' };
+  const ageLabels = { nuevo: 'Menos de 1 año', joven: '1-3 años', establecido: '3-5 años', maduro: 'Más de 5 años' };
+
+  document.getElementById('companySummary').innerHTML = `
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
+      <div><span style="color:var(--text-muted);">Nombre:</span> <strong>${name}</strong></div>
+      <div><span style="color:var(--text-muted);">Sector:</span> <strong>${sector}</strong></div>
+      ${size ? `<div><span style="color:var(--text-muted);">Tamaño:</span> <strong>${sizeLabels[size] || size}</strong></div>` : ''}
+      ${country ? `<div><span style="color:var(--text-muted);">País:</span> <strong>${country}</strong></div>` : ''}
+      ${currency ? `<div><span style="color:var(--text-muted);">Moneda:</span> <strong>${currency}</strong></div>` : ''}
+      ${cash ? `<div><span style="color:var(--text-muted);">Caja inicial:</span> <strong>${formatCurrency(cash)}</strong></div>` : ''}
+      ${employees ? `<div><span style="color:var(--text-muted);">Empleados:</span> <strong>${employees}</strong></div>` : ''}
+      ${age ? `<div><span style="color:var(--text-muted);">Antigüedad:</span> <strong>${ageLabels[age] || age}</strong></div>` : ''}
+    </div>`;
+}
 
 async function createCompany() {
-  const name = document.getElementById('new-name').value.trim();
-  const sector = document.getElementById('new-sector').value.trim();
-  const desc = document.getElementById('new-desc').value.trim();
-  if (!name) return alert('Ingresa un nombre');
+  const name = document.getElementById('companyName').value.trim();
+  const sector = document.getElementById('companySector').value;
+  const size = document.getElementById('companySize').value;
+  const desc = document.getElementById('companyDescription').value.trim();
+  const country = document.getElementById('companyCountry').value;
+  const currency = document.getElementById('companyCurrency').value;
+  const cash = document.getElementById('companyInitialCash').value;
+  const employees = document.getElementById('companyEmployees').value;
+  const age = document.getElementById('companyAge').value;
+
+  if (!name) { notify('error', 'Ingresa el nombre de la empresa'); return; }
+
+  showGlobalLoading('Creando empresa...', 'Preparando el entorno de análisis financiero');
 
   try {
     const r = await fetch(`${API}/api/companies`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, sector, description: desc })
+      body: JSON.stringify({
+        name, sector, size, description: desc,
+        country, currency, initial_cash: cash ? parseFloat(cash) : 0,
+        employees: employees ? parseInt(employees) : 0, age
+      })
     });
     const company = await r.json();
-    closeModal('modal-new-company');
-    document.getElementById('new-name').value = '';
-    document.getElementById('new-sector').value = '';
-    document.getElementById('new-desc').value = '';
+
+    // Reset wizard
+    closeModal('newCompanyModal');
+    resetWizard();
+
+    // Reload and select
     await loadCompanies();
-    document.getElementById('company-select').value = company.id;
-    selectCompany(company.id);
-  } catch(e) { alert('Error creando empresa'); }
+    hideGlobalLoading();
+    await selectCompany(company.id);
+
+    notify('success', `Empresa "${name}" creada exitosamente`);
+  } catch(e) {
+    hideGlobalLoading();
+    notify('error', 'Error creando la empresa');
+  }
+}
+
+function resetWizard() {
+  state.wizardStep = 1;
+  document.getElementById('wizardStep1').style.display = 'block';
+  document.getElementById('wizardStep2').style.display = 'none';
+  document.getElementById('wizardStep3').style.display = 'none';
+  document.getElementById('ws-1').className = 'wizard-step active';
+  document.getElementById('ws-2').className = 'wizard-step';
+  document.getElementById('ws-3').className = 'wizard-step';
+  document.getElementById('wc-1').className = 'wizard-connector';
+  document.getElementById('wc-2').className = 'wizard-connector';
+  // Clear fields
+  document.getElementById('companyName').value = '';
+  document.getElementById('companySector').value = '';
+  document.getElementById('companySize').value = '';
+  document.getElementById('companyDescription').value = '';
+  document.getElementById('companyInitialCash').value = '';
+  document.getElementById('companyEmployees').value = '';
+  document.getElementById('companyAge').value = '';
 }
 
 // ============================================================================
 // Chat / Entrevista
 // ============================================================================
+function handleChatKey(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendMessage();
+  }
+}
+
 async function sendMessage() {
-  const input = document.getElementById('chat-input');
+  const input = document.getElementById('chatInput');
   const msg = input.value.trim();
   if (!msg || !state.companyId) return;
 
   input.value = '';
+  input.style.height = 'auto';
   addChatBubble('user', msg);
+
+  // Show typing indicator
+  const typingId = showTyping();
 
   try {
     const r = await fetch(`${API}/api/chat/interview`, {
@@ -223,22 +407,26 @@ async function sendMessage() {
     });
     const data = await r.json();
     state.sessionId = data.session_id;
+
+    removeTyping(typingId);
     addChatBubble('assistant', data.response);
 
     // Show generate button
-    document.getElementById('btn-generate').style.display = 'flex';
+    document.getElementById('btnGenerateCashflow').style.display = 'inline-flex';
     updateInterviewTopics();
   } catch(e) {
-    addChatBubble('system', 'Error comunicando con el servidor. Verifica que Ollama esté activo.');
+    removeTyping(typingId);
+    addChatBubble('system-msg', 'Error comunicando con el servidor. Verifica que Ollama esté activo.');
   }
 }
 
 function addChatBubble(role, content) {
-  const chatDiv = document.getElementById('chat-messages');
+  const chatDiv = document.getElementById('chatMessages');
   const div = document.createElement('div');
-  div.className = `chat-msg ${role}`;
+  div.className = `chat-message ${role}`;
   // Simple markdown rendering
-  div.innerHTML = content
+  const sanitized = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(content) : content;
+  div.innerHTML = sanitized
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
     .replace(/\n/g, '<br>');
@@ -246,24 +434,41 @@ function addChatBubble(role, content) {
   chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
+function showTyping() {
+  const chatDiv = document.getElementById('chatMessages');
+  const id = 'typing-' + Date.now();
+  const div = document.createElement('div');
+  div.className = 'chat-message assistant';
+  div.id = id;
+  div.innerHTML = '<div class="loading-spinner" style="width:14px;height:14px;border-width:2px;"></div> <span style="font-size:12px;color:var(--text-muted);margin-left:6px;">Analizando...</span>';
+  chatDiv.appendChild(div);
+  chatDiv.scrollTop = chatDiv.scrollHeight;
+  return id;
+}
+
+function removeTyping(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+
 function updateInterviewTopics() {
   const topics = [
     { id: 'business', label: 'Tipo de negocio', icon: 'fa-store' },
     { id: 'products', label: 'Productos/Servicios', icon: 'fa-box' },
+    { id: 'segments', label: 'Segmentos de clientes', icon: 'fa-users' },
     { id: 'revenue', label: 'Modelo de ingresos', icon: 'fa-dollar-sign' },
-    { id: 'costs', label: 'Costos y gastos', icon: 'fa-receipt' },
+    { id: 'prices', label: 'Precios y volúmenes', icon: 'fa-tag' },
     { id: 'growth', label: 'Crecimiento esperado', icon: 'fa-chart-line' },
     { id: 'seasonality', label: 'Estacionalidad', icon: 'fa-calendar' },
+    { id: 'costs', label: 'Costos y gastos', icon: 'fa-receipt' },
+    { id: 'salaries', label: 'Salarios', icon: 'fa-user-tie' },
     { id: 'cash', label: 'Caja y financiamiento', icon: 'fa-piggy-bank' },
     { id: 'risks', label: 'Riesgos principales', icon: 'fa-shield-alt' },
   ];
 
-  const container = document.getElementById('interview-topics');
+  const container = document.getElementById('interviewTopics');
   container.innerHTML = topics.map(t =>
-    `<div style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; margin-bottom:4px; background:rgba(58,109,222,0.05); border:1px solid var(--border);">
-      <i class="fas ${t.icon}" style="font-size:11px; color:var(--text-muted); width:16px;"></i>
-      <span style="font-size:11px; color:var(--text-muted);">${t.label}</span>
-    </div>`
+    `<div class="topic-item"><span class="topic-icon"><i class="fas ${t.icon}"></i></span> ${t.label}</div>`
   ).join('');
 }
 
@@ -273,12 +478,15 @@ function updateInterviewTopics() {
 async function generateCashflow() {
   if (!state.companyId) return;
 
-  switchPage('dashboard');
-  const panel = document.getElementById('gen-progress-panel');
+  navigateTo('dashboard');
+  const panel = document.getElementById('genProgressPanel');
   panel.style.display = 'block';
+  document.getElementById('genBar').style.width = '0%';
+  document.getElementById('genPct').textContent = '0%';
+  document.getElementById('genStep').textContent = 'Iniciando generación...';
+  document.getElementById('genNotifications').innerHTML = '';
 
   try {
-    // Use V2 endpoint
     const r = await fetch(`${API}/api/v2/companies/${state.companyId}/generate-cashflow`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -300,7 +508,8 @@ async function generateCashflow() {
         pollGenerationProgressV1(data.task_id);
       }
     } catch(e2) {
-      panel.innerHTML = '<p style="color:var(--danger);">Error iniciando generación</p>';
+      document.getElementById('genStep').textContent = 'Error iniciando generación';
+      notify('error', 'Error al generar el flujo de caja');
     }
   }
 }
@@ -311,30 +520,33 @@ function pollGenerationProgress(taskId) {
       const r = await fetch(`${API}/api/v2/generation/${taskId}/progress`);
       const data = await r.json();
 
-      document.getElementById('gen-bar').style.width = `${data.progress}%`;
-      document.getElementById('gen-pct').textContent = `${data.progress}%`;
-      document.getElementById('gen-step').textContent = data.step || '';
+      const pct = data.progress_pct || 0;
+      document.getElementById('genBar').style.width = `${pct}%`;
+      document.getElementById('genPct').textContent = `${Math.round(pct)}%`;
+      document.getElementById('genStep').textContent = data.current_step || 'Procesando...';
 
-      // Show notifications
+      // Add notifications
       if (data.notifications && data.notifications.length > 0) {
-        const notifDiv = document.getElementById('gen-notifications');
-        notifDiv.innerHTML = data.notifications.map(n =>
-          `<div class="notification-item">${n.message}</div>`
-        ).join('');
-        notifDiv.scrollTop = notifDiv.scrollHeight;
+        const container = document.getElementById('genNotifications');
+        const existing = container.querySelectorAll('.notification-item').length;
+        data.notifications.slice(existing).forEach(n => {
+          container.innerHTML += `<div class="notification-item"><i class="fas fa-info-circle" style="color:var(--ccs-azul);margin-right:6px;"></i>${n}</div>`;
+        });
+        container.scrollTop = container.scrollHeight;
       }
 
-      if (data.status === 'done') {
+      if (data.status === 'completed' || pct >= 100) {
         clearInterval(poll);
-        document.getElementById('gen-progress-panel').style.display = 'none';
+        document.getElementById('genProgressPanel').style.display = 'none';
         loadCashflow();
+        notify('success', 'Flujo de caja generado exitosamente');
       } else if (data.status === 'error') {
         clearInterval(poll);
-        document.getElementById('gen-step').textContent = `Error: ${data.error}`;
-        document.getElementById('gen-bar').style.background = 'var(--danger)';
+        document.getElementById('genStep').textContent = 'Error: ' + (data.error || 'Error desconocido');
+        notify('error', 'Error en la generación');
       }
     } catch(e) {}
-  }, 1500);
+  }, 2000);
 }
 
 function pollGenerationProgressV1(taskId) {
@@ -342,555 +554,280 @@ function pollGenerationProgressV1(taskId) {
     try {
       const r = await fetch(`${API}/api/generation/${taskId}/progress`);
       const data = await r.json();
-      document.getElementById('gen-bar').style.width = `${data.progress}%`;
-      document.getElementById('gen-pct').textContent = `${data.progress}%`;
-      document.getElementById('gen-step').textContent = data.step || '';
+      const pct = data.progress || 0;
+      document.getElementById('genBar').style.width = `${pct}%`;
+      document.getElementById('genPct').textContent = `${Math.round(pct)}%`;
+      document.getElementById('genStep').textContent = data.step || 'Procesando...';
 
-      if (data.status === 'done') {
+      if (data.status === 'completed' || pct >= 100) {
         clearInterval(poll);
-        document.getElementById('gen-progress-panel').style.display = 'none';
+        document.getElementById('genProgressPanel').style.display = 'none';
         loadCashflow();
-      } else if (data.status === 'error') {
-        clearInterval(poll);
-        document.getElementById('gen-step').textContent = `Error: ${data.error}`;
+        notify('success', 'Flujo de caja generado');
       }
     } catch(e) {}
-  }, 2000);
+  }, 3000);
 }
 
 // ============================================================================
 // Dashboard
 // ============================================================================
 async function loadCashflow() {
-  if (!state.companyId) return;
   try {
     const r = await fetch(`${API}/api/companies/${state.companyId}/cashflow`);
-    if (!r.ok) return;
-    state.cashflow = await r.json();
-    renderDashboard();
-  } catch(e) {}
+    const data = await r.json();
+    state.cashflow = data;
+    renderDashboard(data);
+  } catch(e) {
+    document.getElementById('dashboardStats').innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
+      <div class="empty-icon"><i class="fas fa-chart-line"></i></div>
+      <div class="empty-title">Sin flujo de caja</div>
+      <div class="empty-desc">Completa la entrevista y genera el flujo de caja para ver el dashboard</div>
+    </div>`;
+  }
 }
 
-function renderDashboard() {
-  const cf = state.cashflow;
-  if (!cf || !cf.months || cf.months.length === 0) return;
-
-  const summary = cf.summary || {};
-  const months = cf.months;
-  const metrics = cf.metrics || {};
+function renderDashboard(data) {
+  const months = data.months || data.cashflow?.months || [];
+  if (!months.length) return;
 
   // Stats
-  renderStats(summary, metrics);
+  const totalIncome = months.reduce((s, m) => s + (m.income?.total || m.income_total || 0), 0);
+  const totalExpenses = months.reduce((s, m) => s + (m.expenses?.total || m.expenses_total || 0), 0);
+  const lastBalance = months[months.length - 1]?.cumulative_balance || 0;
+  const netFlow = totalIncome - totalExpenses;
+
+  document.getElementById('dashboardStats').innerHTML = `
+    <div class="stat-card"><div class="stat-label">Ingresos Totales</div><div class="stat-value">${formatCurrencyShort(totalIncome)}</div><div class="stat-sub">12 meses</div></div>
+    <div class="stat-card green"><div class="stat-label">Flujo Neto</div><div class="stat-value ${netFlow >= 0 ? 'positive' : 'negative'}">${formatCurrencyShort(netFlow)}</div><div class="stat-sub">acumulado</div></div>
+    <div class="stat-card blue"><div class="stat-label">Saldo Final</div><div class="stat-value">${formatCurrencyShort(lastBalance)}</div><div class="stat-sub">proyectado</div></div>
+    <div class="stat-card celeste"><div class="stat-label">Gastos Totales</div><div class="stat-value">${formatCurrencyShort(totalExpenses)}</div><div class="stat-sub">12 meses</div></div>
+  `;
+
   // Charts
   renderCashflowChart(months);
-  renderBalanceChart(months);
-  renderExpensesPie(months);
-  renderIncomeExpensesChart(months);
-  // Table
-  renderMonthlyTable(months);
-  // Alerts
-  renderAlerts(cf.alerts || []);
-}
-
-function renderStats(summary, metrics) {
-  const stats = document.getElementById('dashboard-stats');
-  const fmt = (n) => {
-    if (Math.abs(n) >= 1000000) return `$${(n/1000000).toFixed(1)}M`;
-    if (Math.abs(n) >= 1000) return `$${(n/1000).toFixed(0)}K`;
-    return `$${n.toFixed(0)}`;
-  };
-
-  const items = [
-    { label: 'Ingresos Totales', value: fmt(summary.total_income || 0), color: 'green' },
-    { label: 'Gastos Totales', value: fmt(summary.total_expenses || 0), color: 'red' },
-    { label: 'Flujo Neto', value: fmt(summary.net_cashflow || 0), color: (summary.net_cashflow || 0) >= 0 ? 'green' : 'red' },
-    { label: 'Promedio Mensual', value: fmt(summary.average_monthly_balance || 0), color: '' },
-    { label: 'Margen Bruto', value: metrics.margen_bruto_pct ? `${metrics.margen_bruto_pct.toFixed(1)}%` : '-', color: 'purple' },
-    { label: 'Runway', value: metrics.runway_meses ? `${metrics.runway_meses} meses` : '-', color: 'yellow' },
-  ];
-
-  stats.innerHTML = items.map(i =>
-    `<div class="stat-card ${i.color}"><div class="stat-label">${i.label}</div><div class="stat-value" style="font-size:18px;">${i.value}</div></div>`
-  ).join('');
+  renderIncomeExpenseChart(months);
+  renderDashboardTable(months);
 }
 
 function renderCashflowChart(months) {
-  const ctx = document.getElementById('chart-cashflow');
+  const ctx = document.getElementById('chartCashflow');
   if (state.charts.cashflow) state.charts.cashflow.destroy();
 
   state.charts.cashflow = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: months.map(m => m.label || m.month),
-      datasets: [
-        { label: 'Ingresos', data: months.map(m => m.income?.total || 0), backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 },
-        { label: 'Gastos', data: months.map(m => -(m.expenses?.total || 0)), backgroundColor: 'rgba(239,68,68,0.7)', borderRadius: 4 },
-        { label: 'Flujo Neto', data: months.map(m => m.net_flow || 0), type: 'line', borderColor: '#3b82f6', borderWidth: 2, pointRadius: 3, fill: false }
-      ]
-    },
-    options: chartOptions('Monto ($)')
-  });
-}
-
-function renderBalanceChart(months) {
-  const ctx = document.getElementById('chart-balance');
-  if (state.charts.balance) state.charts.balance.destroy();
-
-  const balances = months.map(m => m.cumulative_balance || 0);
-  const gradient = ctx.getContext('2d').createLinearGradient(0, 0, 0, 200);
-  gradient.addColorStop(0, 'rgba(59,130,246,0.3)');
-  gradient.addColorStop(1, 'rgba(59,130,246,0.0)');
-
-  state.charts.balance = new Chart(ctx, {
     type: 'line',
     data: {
       labels: months.map(m => m.label || m.month),
       datasets: [{
         label: 'Saldo Acumulado',
-        data: balances,
-        borderColor: '#3b82f6',
-        backgroundColor: gradient,
+        data: months.map(m => m.cumulative_balance),
+        borderColor: '#0D3DA6',
+        backgroundColor: 'rgba(13,61,166,0.08)',
         fill: true,
         tension: 0.3,
-        pointRadius: 3,
+        pointRadius: 4,
+        pointBackgroundColor: '#0D3DA6',
       }]
     },
-    options: chartOptions('Saldo ($)')
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { ticks: { callback: v => formatCurrencyShort(v) } }
+      }
+    }
   });
 }
 
-function renderExpensesPie(months) {
-  const ctx = document.getElementById('chart-expenses');
-  if (state.charts.expenses) state.charts.expenses.destroy();
+function renderIncomeExpenseChart(months) {
+  const ctx = document.getElementById('chartIncomeExpense');
+  if (state.charts.incomeExpense) state.charts.incomeExpense.destroy();
 
-  let totals = { variable_costs: 0, fixed_costs: 0, variable_expenses: 0, debt_payments: 0, taxes: 0, investments: 0 };
-  months.forEach(m => {
-    const e = m.expenses || {};
-    totals.variable_costs += e.variable_costs || 0;
-    totals.fixed_costs += e.fixed_costs || 0;
-    totals.variable_expenses += e.variable_expenses || 0;
-    totals.debt_payments += e.debt_payments || 0;
-    totals.taxes += e.taxes || 0;
-    totals.investments += e.investments || 0;
-  });
-
-  state.charts.expenses = new Chart(ctx, {
-    type: 'doughnut',
-    data: {
-      labels: ['C. Variables', 'C. Fijos', 'Gastos Var.', 'Deudas', 'Impuestos', 'Inversiones'],
-      datasets: [{
-        data: Object.values(totals),
-        backgroundColor: ['#ef4444', '#f97316', '#eab308', '#8b5cf6', '#06b6d4', '#22c55e'],
-      }]
-    },
-    options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', font: { size: 10 } } } } }
-  });
-}
-
-function renderIncomeExpensesChart(months) {
-  const ctx = document.getElementById('chart-income-expenses');
-  if (state.charts.incomeExpenses) state.charts.incomeExpenses.destroy();
-
-  state.charts.incomeExpenses = new Chart(ctx, {
+  state.charts.incomeExpense = new Chart(ctx, {
     type: 'bar',
     data: {
       labels: months.map(m => m.label || m.month),
       datasets: [
-        { label: 'Ingresos', data: months.map(m => m.income?.total || 0), backgroundColor: 'rgba(34,197,94,0.6)', borderRadius: 3 },
-        { label: 'Gastos', data: months.map(m => m.expenses?.total || 0), backgroundColor: 'rgba(239,68,68,0.6)', borderRadius: 3 },
+        { label: 'Ingresos', data: months.map(m => m.income?.total || m.income_total || 0), backgroundColor: 'rgba(61,174,43,0.7)', borderRadius: 4 },
+        { label: 'Gastos', data: months.map(m => m.expenses?.total || m.expenses_total || 0), backgroundColor: 'rgba(220,38,38,0.6)', borderRadius: 4 },
       ]
     },
-    options: chartOptions('')
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'top' } },
+      scales: { y: { ticks: { callback: v => formatCurrencyShort(v) } } }
+    }
   });
 }
 
-function renderMonthlyTable(months) {
-  const tbody = document.getElementById('monthly-tbody');
-  tbody.innerHTML = months.map(m => {
-    const nf = m.net_flow || 0;
-    const bal = m.cumulative_balance || 0;
-    return `<tr>
-      <td>${m.label || m.month}</td>
-      <td style="text-align:right;">${fmtMoney(m.income?.total || 0)}</td>
-      <td style="text-align:right;">${fmtMoney(m.expenses?.variable_costs || 0)}</td>
-      <td style="text-align:right;">${fmtMoney(m.expenses?.fixed_costs || 0)}</td>
-      <td style="text-align:right;">${fmtMoney((m.expenses?.variable_expenses || 0) + (m.expenses?.debt_payments || 0) + (m.expenses?.taxes || 0))}</td>
-      <td style="text-align:right;" class="${nf >= 0 ? 'positive' : 'negative'}">${fmtMoney(nf)}</td>
-      <td style="text-align:right;" class="${bal >= 0 ? 'positive' : 'negative'}">${fmtMoney(bal)}</td>
-    </tr>`;
-  }).join('');
-}
-
-function renderAlerts(alerts) {
-  const div = document.getElementById('alerts-list');
-  if (!alerts || alerts.length === 0) {
-    div.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">Sin alertas activas</p>';
-    return;
-  }
-  div.innerHTML = alerts.map(a =>
-    `<div class="alert-item ${a.type}">
-      <i class="fas ${a.type === 'danger' ? 'fa-exclamation-circle' : 'fa-exclamation-triangle'}" style="color:${a.type === 'danger' ? 'var(--danger)' : 'var(--warning)'};"></i>
-      <div><strong style="font-size:11px;">${a.month}</strong><br><span style="font-size:11px;">${a.message}</span></div>
-    </div>`
-  ).join('');
+function renderDashboardTable(months) {
+  const container = document.getElementById('dashboardTable');
+  container.innerHTML = `<table class="data-table">
+    <thead><tr><th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Flujo Neto</th><th>Saldo</th></tr></thead>
+    <tbody>${months.map(m => {
+      const income = m.income?.total || m.income_total || 0;
+      const expenses = m.expenses?.total || m.expenses_total || 0;
+      const net = m.net_flow || (income - expenses);
+      return `<tr>
+        <td><strong>${m.label || m.month}</strong></td>
+        <td>${formatCurrency(income)}</td>
+        <td>${formatCurrency(expenses)}</td>
+        <td class="${net >= 0 ? 'positive' : 'negative'}">${formatCurrency(net)}</td>
+        <td><strong>${formatCurrency(m.cumulative_balance)}</strong></td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
 }
 
 // ============================================================================
 // Simulación
 // ============================================================================
-function updateSlider(name) {
-  const val = document.getElementById(`sl-${name}`).value;
-  const suffix = name === 'hires' ? '' : '%';
-  document.getElementById(`val-${name}`).textContent = `${val}${suffix}`;
-}
-
-function resetSliders() {
-  ['sales', 'costs', 'fixed', 'inflation', 'hires', 'taxes'].forEach(n => {
-    document.getElementById(`sl-${n}`).value = 0;
-    updateSlider(n);
-  });
-}
-
-async function runSimulation() {
-  if (!state.companyId) return alert('Selecciona una empresa');
-
-  const params = {
-    sales_change_pct: parseInt(document.getElementById('sl-sales').value),
-    costs_change_pct: parseInt(document.getElementById('sl-costs').value),
-    fixed_costs_change_pct: parseInt(document.getElementById('sl-fixed').value),
-    inflation_annual_pct: parseInt(document.getElementById('sl-inflation').value),
-    new_hires: parseInt(document.getElementById('sl-hires').value),
-    tax_change_pct: parseInt(document.getElementById('sl-taxes').value),
-  };
-
-  try {
-    const r = await fetch(`${API}/api/companies/${state.companyId}/simulate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction: 'Simulación interactiva', params })
-    });
-    const data = await r.json();
-
-    if (data.task_id) {
-      pollSimulation(data.task_id);
-    }
-  } catch(e) { alert('Error ejecutando simulación'); }
-}
-
-function pollSimulation(taskId) {
-  const poll = setInterval(async () => {
-    try {
-      const r = await fetch(`${API}/api/generation/${taskId}/progress`);
-      const data = await r.json();
-
-      if (data.status === 'done' && data.scenario_id) {
-        clearInterval(poll);
-        loadScenarioResult(data.scenario_id);
-      } else if (data.status === 'error') {
-        clearInterval(poll);
-        alert('Error: ' + data.error);
-      }
-    } catch(e) {}
-  }, 1000);
-}
-
-async function loadScenarioResult(scenarioId) {
-  try {
-    const r = await fetch(`${API}/api/scenarios/${scenarioId}`);
-    const scenario = await r.json();
-    renderSimulationChart(scenario);
-    renderSimulationImpact(scenario);
-    renderSimulationRecs(scenario);
-  } catch(e) {}
-}
-
-function renderSimulationChart(scenario) {
-  const ctx = document.getElementById('chart-sim');
-  if (state.charts.sim) state.charts.sim.destroy();
-
-  const baseMonths = state.cashflow?.months || [];
-  const simMonths = scenario.months || [];
-
-  state.charts.sim = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: simMonths.map(m => m.label || m.month),
-      datasets: [
-        { label: 'Base', data: baseMonths.map(m => m.cumulative_balance || 0), borderColor: '#64748b', borderWidth: 2, borderDash: [5,5], pointRadius: 2, fill: false },
-        { label: 'Simulado', data: simMonths.map(m => m.cumulative_balance || 0), borderColor: '#8b5cf6', borderWidth: 2, pointRadius: 3, fill: false },
-      ]
-    },
-    options: chartOptions('Saldo ($)')
-  });
-}
-
-function renderSimulationImpact(scenario) {
-  const div = document.getElementById('sim-impact');
-  const content = document.getElementById('sim-impact-content');
-  const impact = scenario.impact_summary;
-  if (!impact) { div.style.display = 'none'; return; }
-
-  div.style.display = 'block';
-  content.innerHTML = `
-    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
-      <div class="stat-card ${impact.income_change >= 0 ? 'green' : 'red'}"><div class="stat-label">Ingresos</div><div class="stat-value" style="font-size:14px;">${fmtMoney(impact.income_change)}</div></div>
-      <div class="stat-card ${impact.expenses_change <= 0 ? 'green' : 'red'}"><div class="stat-label">Gastos</div><div class="stat-value" style="font-size:14px;">${fmtMoney(impact.expenses_change)}</div></div>
-      <div class="stat-card ${impact.net_change >= 0 ? 'green' : 'red'}"><div class="stat-label">Neto</div><div class="stat-value" style="font-size:14px;">${fmtMoney(impact.net_change)}</div></div>
-    </div>
-    <p style="font-size:12px; color:var(--text-muted); margin-top:8px;">${impact.description || ''}</p>
+function renderSimulationControls() {
+  const container = document.getElementById('simulationControls');
+  container.innerHTML = `
+    <div class="slider-group"><label><span>Variación de ventas</span><span id="sliderSalesVal">0%</span></label>
+      <input type="range" min="-50" max="100" value="0" id="sliderSales" oninput="document.getElementById('sliderSalesVal').textContent=this.value+'%'"></div>
+    <div class="slider-group"><label><span>Costos variables</span><span id="sliderCostsVal">0%</span></label>
+      <input type="range" min="-30" max="50" value="0" id="sliderCosts" oninput="document.getElementById('sliderCostsVal').textContent=this.value+'%'"></div>
+    <div class="slider-group"><label><span>Costos fijos</span><span id="sliderFixedVal">0%</span></label>
+      <input type="range" min="-20" max="40" value="0" id="sliderFixed" oninput="document.getElementById('sliderFixedVal').textContent=this.value+'%'"></div>
+    <div class="slider-group"><label><span>Inflación anual</span><span id="sliderInflVal">0%</span></label>
+      <input type="range" min="0" max="30" value="0" id="sliderInfl" oninput="document.getElementById('sliderInflVal').textContent=this.value+'%'"></div>
+    <div class="slider-group"><label><span>Nuevos clientes</span><span id="sliderClientsVal">0%</span></label>
+      <input type="range" min="-20" max="50" value="0" id="sliderClients" oninput="document.getElementById('sliderClientsVal').textContent=this.value+'%'"></div>
   `;
 }
 
-function renderSimulationRecs(scenario) {
-  const div = document.getElementById('sim-recs');
-  const content = document.getElementById('sim-recs-content');
-  const recs = scenario.recommendations;
-  if (!recs || recs.length === 0) { div.style.display = 'none'; return; }
+function resetSliders() {
+  ['Sales','Costs','Fixed','Infl','Clients'].forEach(s => {
+    const el = document.getElementById(`slider${s}`);
+    if (el) { el.value = 0; document.getElementById(`slider${s}Val`).textContent = '0%'; }
+  });
+}
 
-  div.style.display = 'block';
-  content.innerHTML = recs.map(r => `<div style="font-size:12px; padding:6px 0; border-bottom:1px solid var(--border);">• ${r}</div>`).join('');
+async function applySimulation() {
+  if (!state.companyId) return;
+  const params = {
+    sales_change_pct: parseFloat(document.getElementById('sliderSales')?.value || 0),
+    variable_costs_change_pct: parseFloat(document.getElementById('sliderCosts')?.value || 0),
+    fixed_costs_change_pct: parseFloat(document.getElementById('sliderFixed')?.value || 0),
+    inflation_pct: parseFloat(document.getElementById('sliderInfl')?.value || 0),
+    new_clients_pct: parseFloat(document.getElementById('sliderClients')?.value || 0),
+  };
+
+  try {
+    const r = await fetch(`${API}/api/v2/companies/${state.companyId}/custom-scenario`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Simulación manual', multipliers: params })
+    });
+    const data = await r.json();
+    if (data.months) renderSimulationChart(data.months);
+    notify('success', 'Simulación aplicada');
+  } catch(e) {
+    // Fallback to V1
+    try {
+      const r = await fetch(`${API}/api/companies/${state.companyId}/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
+      });
+      const data = await r.json();
+      if (data.months) renderSimulationChart(data.months);
+    } catch(e2) { notify('error', 'Error en simulación'); }
+  }
+}
+
+function renderSimulationChart(months) {
+  const ctx = document.getElementById('chartSimulation');
+  if (state.charts.simulation) state.charts.simulation.destroy();
+
+  state.charts.simulation = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: months.map(m => m.label || m.month),
+      datasets: [{
+        label: 'Saldo Simulado',
+        data: months.map(m => m.cumulative_balance),
+        borderColor: '#3A6DDE',
+        backgroundColor: 'rgba(58,109,222,0.08)',
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { ticks: { callback: v => formatCurrencyShort(v) } } }
+    }
+  });
 }
 
 // ============================================================================
 // Monte Carlo
 // ============================================================================
 async function runMonteCarlo() {
-  if (!state.companyId) return alert('Selecciona una empresa');
-  const iterations = parseInt(document.getElementById('mc-iterations').value) || 500;
-
-  document.getElementById('mc-progress').style.display = 'block';
-  document.getElementById('mc-results').style.display = 'none';
+  if (!state.companyId) return;
+  showGlobalLoading('Ejecutando Monte Carlo...', 'Simulando miles de escenarios');
 
   try {
     const r = await fetch(`${API}/api/v2/companies/${state.companyId}/monte-carlo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ iterations })
+      body: JSON.stringify({ iterations: 1000 })
     });
     const data = await r.json();
-
-    if (data.task_id) {
-      pollMonteCarlo(data.task_id);
-    }
+    hideGlobalLoading();
+    renderMonteCarloResults(data);
+    notify('success', 'Simulación Monte Carlo completada');
   } catch(e) {
-    alert('Error ejecutando Monte Carlo. Verifica que tengas un cashflow generado.');
-    document.getElementById('mc-progress').style.display = 'none';
+    hideGlobalLoading();
+    notify('error', 'Error ejecutando Monte Carlo');
   }
 }
 
-function pollMonteCarlo(taskId) {
-  const poll = setInterval(async () => {
-    try {
-      const r = await fetch(`${API}/api/v2/generation/${taskId}/progress`);
-      const data = await r.json();
-
-      document.getElementById('mc-bar').style.width = `${data.progress}%`;
-      document.getElementById('mc-pct').textContent = `${data.progress}%`;
-
-      if (data.status === 'done') {
-        clearInterval(poll);
-        document.getElementById('mc-progress').style.display = 'none';
-        renderMonteCarloResults(data.result);
-      } else if (data.status === 'error') {
-        clearInterval(poll);
-        document.getElementById('mc-progress').style.display = 'none';
-        alert('Error: ' + data.error);
-      }
-    } catch(e) {}
-  }, 1500);
-}
-
-function renderMonteCarloResults(results) {
-  if (!results) return;
-  document.getElementById('mc-results').style.display = 'block';
-
+function renderMonteCarloResults(data) {
   // Stats
-  document.getElementById('mc-insolvency').textContent = `${(results.probabilidad_insolvencia_pct || 0).toFixed(1)}%`;
-  document.getElementById('mc-min').textContent = fmtCompact(results.percentiles?.p5 || 0);
-  document.getElementById('mc-median').textContent = fmtCompact(results.percentiles?.p50 || 0);
-  document.getElementById('mc-max').textContent = fmtCompact(results.percentiles?.p95 || 0);
+  document.getElementById('mcStats').innerHTML = `
+    <div class="stat-card ${data.probabilidad_insolvencia_pct > 20 ? 'red' : 'green'}">
+      <div class="stat-label">Prob. Insolvencia</div>
+      <div class="stat-value">${data.probabilidad_insolvencia_pct?.toFixed(1) || 0}%</div>
+    </div>
+    <div class="stat-card blue">
+      <div class="stat-label">Nivel de Riesgo</div>
+      <div class="stat-value" style="font-size:18px;">${data.nivel_riesgo?.nivel || 'N/A'}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">VaR 95%</div>
+      <div class="stat-value" style="font-size:16px;">${formatCurrencyShort(data.var_95 || 0)}</div>
+    </div>
+    <div class="stat-card celeste">
+      <div class="stat-label">Iteraciones</div>
+      <div class="stat-value">${data.iteraciones || 0}</div>
+    </div>
+  `;
 
-  // Risk badge
-  const risk = results.nivel_riesgo || {};
-  const riskDiv = document.getElementById('mc-risk');
-  const badge = document.getElementById('mc-risk-badge');
-  riskDiv.style.display = 'block';
-  badge.textContent = risk.nivel || 'N/A';
-  badge.style.background = risk.color || '#334155';
-  badge.style.color = '#fff';
-
-  // Distribution chart
-  renderMCDistribution(results);
   // Bands chart
-  renderMCBands(results);
-}
+  if (data.bandas_mensuales) {
+    const ctx = document.getElementById('chartMC');
+    if (state.charts.mc) state.charts.mc.destroy();
 
-function renderMCDistribution(results) {
-  const ctx = document.getElementById('chart-mc-dist');
-  if (state.charts.mcDist) state.charts.mcDist.destroy();
-
-  const hist = results.histograma || [];
-  if (hist.length === 0) return;
-
-  state.charts.mcDist = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: hist.map(h => fmtCompact(h.rango_min)),
-      datasets: [{
-        label: 'Frecuencia',
-        data: hist.map(h => h.frecuencia),
-        backgroundColor: hist.map(h => h.rango_min < 0 ? 'rgba(239,68,68,0.6)' : 'rgba(34,197,94,0.6)'),
-        borderRadius: 3,
-      }]
-    },
-    options: { ...chartOptions('Iteraciones'), plugins: { legend: { display: false } } }
-  });
-}
-
-function renderMCBands(results) {
-  const ctx = document.getElementById('chart-mc-bands');
-  if (state.charts.mcBands) state.charts.mcBands.destroy();
-
-  const bands = results.bandas_mensuales || [];
-  if (bands.length === 0) return;
-
-  state.charts.mcBands = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: bands.map((_, i) => `Mes ${i + 1}`),
-      datasets: [
-        { label: 'P95', data: bands.map(b => b.p95), borderColor: 'rgba(34,197,94,0.5)', backgroundColor: 'rgba(34,197,94,0.1)', fill: '+1', pointRadius: 0 },
-        { label: 'Mediana', data: bands.map(b => b.p50), borderColor: '#3b82f6', borderWidth: 2, pointRadius: 2, fill: false },
-        { label: 'P5', data: bands.map(b => b.p5), borderColor: 'rgba(239,68,68,0.5)', backgroundColor: 'rgba(239,68,68,0.1)', fill: '-1', pointRadius: 0 },
-      ]
-    },
-    options: chartOptions('Saldo ($)')
-  });
-}
-
-// ============================================================================
-// Escenarios y Versiones
-// ============================================================================
-async function loadScenarios() {
-  if (!state.companyId) return;
-  try {
-    const r = await fetch(`${API}/api/companies/${state.companyId}/scenarios`);
-    const data = await r.json();
-    const list = document.getElementById('scenarios-list');
-
-    if (!data.scenarios || data.scenarios.length === 0) {
-      list.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">Sin escenarios. Crea uno desde Simulación.</p>';
-      return;
-    }
-
-    list.innerHTML = data.scenarios.map(s =>
-      `<div style="display:flex; align-items:center; justify-content:space-between; padding:8px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px;">
-        <div>
-          <div style="font-size:12px; font-weight:600;">${s.scenario_name || 'Escenario'}</div>
-          <div style="font-size:10px; color:var(--text-muted);">${s.created_at?.substring(0, 10) || ''} — ${s.simulation_mode || 'local'}</div>
-        </div>
-        <button class="btn btn-sm btn-secondary" onclick="deleteScenario('${s.id}')"><i class="fas fa-trash"></i></button>
-      </div>`
-    ).join('');
-
-    // Render comparison chart
-    renderComparisonChart(data.scenarios);
-  } catch(e) {}
-}
-
-async function loadVersions() {
-  if (!state.companyId) return;
-  try {
-    const r = await fetch(`${API}/api/v2/companies/${state.companyId}/cashflow-versions`);
-    const data = await r.json();
-    const list = document.getElementById('versions-list');
-
-    if (!data.versions || data.versions.length === 0) {
-      list.innerHTML = '<p style="color:var(--text-muted); font-size:12px;">Sin versiones guardadas.</p>';
-      return;
-    }
-
-    list.innerHTML = data.versions.map(v =>
-      `<div style="display:flex; align-items:center; justify-content:space-between; padding:8px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px;">
-        <div>
-          <div style="font-size:12px; font-weight:600;">${v.name}</div>
-          <div style="font-size:10px; color:var(--text-muted);">${v.months} meses — ${v.version}</div>
-        </div>
-        ${!v.is_current ? `<button class="btn btn-sm btn-secondary" onclick="restoreVersion('${v.id}')"><i class="fas fa-undo"></i> Restaurar</button>` : '<span style="font-size:10px; color:var(--success);">Actual</span>'}
-      </div>`
-    ).join('');
-  } catch(e) {}
-}
-
-async function saveVersion() {
-  if (!state.companyId) return;
-  const name = prompt('Nombre de la versión:', `Versión ${new Date().toLocaleDateString()}`);
-  if (!name) return;
-
-  try {
-    await fetch(`${API}/api/v2/companies/${state.companyId}/cashflow-versions?name=${encodeURIComponent(name)}`, { method: 'POST' });
-    loadVersions();
-  } catch(e) { alert('Error guardando versión'); }
-}
-
-async function restoreVersion(versionId) {
-  if (!confirm('¿Restaurar esta versión? Se guardará un backup de la actual.')) return;
-  try {
-    await fetch(`${API}/api/v2/companies/${state.companyId}/cashflow-versions/${versionId}/restore`, { method: 'PUT' });
-    loadCashflow();
-    loadVersions();
-  } catch(e) { alert('Error restaurando versión'); }
-}
-
-async function deleteScenario(id) {
-  if (!confirm('¿Eliminar este escenario?')) return;
-  try {
-    await fetch(`${API}/api/scenarios/${id}`, { method: 'DELETE' });
-    loadScenarios();
-  } catch(e) {}
-}
-
-function renderComparisonChart(scenarios) {
-  const ctx = document.getElementById('chart-compare');
-  if (state.charts.compare) state.charts.compare.destroy();
-
-  const datasets = [];
-  const colors = ['#3b82f6', '#8b5cf6', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4'];
-
-  // Base
-  if (state.cashflow && state.cashflow.months) {
-    datasets.push({
-      label: 'Plan Base',
-      data: state.cashflow.months.map(m => m.cumulative_balance || 0),
-      borderColor: '#64748b',
-      borderWidth: 2,
-      borderDash: [5, 5],
-      pointRadius: 2,
-      fill: false,
+    const labels = data.bandas_mensuales.map((_, i) => `Mes ${i + 1}`);
+    state.charts.mc = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'P95', data: data.bandas_mensuales.map(b => b.p95), borderColor: 'rgba(61,174,43,0.5)', fill: false, borderDash: [5,5], pointRadius: 0 },
+          { label: 'P75', data: data.bandas_mensuales.map(b => b.p75), borderColor: 'rgba(61,174,43,0.3)', backgroundColor: 'rgba(61,174,43,0.05)', fill: '+1', pointRadius: 0 },
+          { label: 'Mediana', data: data.bandas_mensuales.map(b => b.p50), borderColor: '#0D3DA6', borderWidth: 2, pointRadius: 3 },
+          { label: 'P25', data: data.bandas_mensuales.map(b => b.p25), borderColor: 'rgba(220,38,38,0.3)', backgroundColor: 'rgba(220,38,38,0.05)', fill: '+1', pointRadius: 0 },
+          { label: 'P5', data: data.bandas_mensuales.map(b => b.p5), borderColor: 'rgba(220,38,38,0.5)', fill: false, borderDash: [5,5], pointRadius: 0 },
+        ]
+      },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } }, scales: { y: { ticks: { callback: v => formatCurrencyShort(v) } } } }
     });
   }
-
-  scenarios.slice(0, 5).forEach((s, i) => {
-    if (s.months) {
-      datasets.push({
-        label: s.scenario_name || `Escenario ${i + 1}`,
-        data: s.months.map(m => m.cumulative_balance || 0),
-        borderColor: colors[i % colors.length],
-        borderWidth: 2,
-        pointRadius: 2,
-        fill: false,
-      });
-    }
-  });
-
-  const maxLabels = Math.max(...datasets.map(d => d.data.length), 0);
-  const labels = Array.from({ length: maxLabels }, (_, i) => `Mes ${i + 1}`);
-
-  state.charts.compare = new Chart(ctx, {
-    type: 'line',
-    data: { labels, datasets },
-    options: chartOptions('Saldo ($)')
-  });
 }
 
 // ============================================================================
@@ -900,84 +837,115 @@ async function loadMetrics() {
   if (!state.companyId) return;
   try {
     const r = await fetch(`${API}/api/v2/companies/${state.companyId}/metrics`);
-    if (!r.ok) return;
-    const metrics = await r.json();
-    renderMetricsCards(metrics);
+    const data = await r.json();
+    renderMetrics(data);
+  } catch(e) {
+    document.getElementById('metricsContent').innerHTML = '<div class="empty-state"><div class="empty-title">Sin métricas disponibles</div><div class="empty-desc">Genera el flujo de caja primero</div></div>';
+  }
+}
+
+function renderMetrics(data) {
+  const container = document.getElementById('metricsContent');
+  const m = data.metrics || data;
+
+  container.innerHTML = `
+    <div class="grid-3" style="margin-bottom:16px;">
+      ${renderMetricCard('Caja Mínima', formatCurrency(m.caja_minima?.valor || 0), m.caja_minima?.mes || '', m.caja_minima?.es_negativa ? 'red' : 'green')}
+      ${renderMetricCard('Break-even', formatCurrency(m.break_even_operativo?.ventas_mensuales_necesarias || 0), 'ventas/mes necesarias', 'blue')}
+      ${renderMetricCard('Runway', m.runway_meses?.meses === Infinity ? '∞' : (m.runway_meses?.meses || 0) + ' meses', m.runway_meses?.mensaje || '', 'celeste')}
+    </div>
+    <div class="grid-3" style="margin-bottom:16px;">
+      ${renderMetricCard('Margen Bruto', (m.margen_bruto_pct?.pct || 0).toFixed(1) + '%', formatCurrency(m.margen_bruto_pct?.absoluto || 0), 'green')}
+      ${renderMetricCard('Margen EBITDA', (m.margen_ebitda_pct?.pct || 0).toFixed(1) + '%', formatCurrency(m.margen_ebitda_pct?.absoluto || 0), 'blue')}
+      ${renderMetricCard('Financiamiento', m.necesidad_financiamiento?.necesita_financiamiento ? formatCurrency(m.necesidad_financiamiento?.monto || 0) : 'No necesita', m.necesidad_financiamiento?.mensaje || '', m.necesidad_financiamiento?.necesita_financiamiento ? 'yellow' : 'green')}
+    </div>
+    ${m.resumen_ejecutivo ? `<div class="card"><div class="card-title" style="color:${m.resumen_ejecutivo.color || 'var(--ccs-azul-oscuro)'}"><i class="fas fa-heartbeat"></i> Salud Financiera: ${m.resumen_ejecutivo.salud} (${m.resumen_ejecutivo.score}/100)</div></div>` : ''}
+  `;
+}
+
+function renderMetricCard(label, value, sub, color) {
+  return `<div class="stat-card ${color}"><div class="stat-label">${label}</div><div class="stat-value" style="font-size:18px;">${value}</div><div class="stat-sub">${sub}</div></div>`;
+}
+
+// ============================================================================
+// Versiones y Escenarios
+// ============================================================================
+async function loadVersions() {
+  if (!state.companyId) return;
+  try {
+    const r = await fetch(`${API}/api/v2/companies/${state.companyId}/cashflow-versions`);
+    const data = await r.json();
+    renderVersions(data.versions || []);
   } catch(e) {}
 }
 
-function renderMetricsCards(metrics) {
-  const container = document.getElementById('metrics-cards');
-  const items = [
-    { label: 'Caja Mínima', value: fmtCompact(metrics.caja_minima || 0), color: metrics.caja_minima < 0 ? 'red' : 'green', desc: metrics.mes_caja_minima || '' },
-    { label: 'Mes Caja Negativa', value: metrics.primer_mes_caja_negativa || 'Ninguno', color: metrics.primer_mes_caja_negativa ? 'red' : 'green', desc: '' },
-    { label: 'Break-even Operativo', value: metrics.breakeven_mes || 'N/A', color: '', desc: '' },
-    { label: 'Runway', value: metrics.runway_meses ? `${metrics.runway_meses} meses` : 'Indefinido', color: 'yellow', desc: '' },
-    { label: 'Margen Bruto', value: metrics.margen_bruto_pct ? `${metrics.margen_bruto_pct.toFixed(1)}%` : '-', color: 'green', desc: '' },
-    { label: 'Margen EBITDA', value: metrics.margen_ebitda_pct ? `${metrics.margen_ebitda_pct.toFixed(1)}%` : '-', color: 'purple', desc: '' },
-    { label: 'Necesidad Financiamiento', value: fmtCompact(metrics.necesidad_max_financiamiento || 0), color: 'red', desc: '' },
-    { label: 'Prob. Insolvencia (MC)', value: metrics.probabilidad_insolvencia_mc ? `${metrics.probabilidad_insolvencia_mc.toFixed(1)}%` : '-', color: 'red', desc: '' },
-    { label: 'Meses Proyectados', value: metrics.num_meses || '-', color: '', desc: '' },
-  ];
-
-  container.innerHTML = items.map(i =>
-    `<div class="stat-card ${i.color}">
-      <div class="stat-label">${i.label}</div>
-      <div class="stat-value" style="font-size:16px;">${i.value}</div>
-      ${i.desc ? `<div class="stat-sub">${i.desc}</div>` : ''}
-    </div>`
-  ).join('');
+function renderVersions(versions) {
+  const container = document.getElementById('scenariosList');
+  if (!versions.length) {
+    container.innerHTML = '<div class="empty-state"><div class="empty-title">Sin versiones guardadas</div><div class="empty-desc">Guarda versiones del cashflow para comparar escenarios</div></div>';
+    return;
+  }
+  container.innerHTML = versions.map(v => `
+    <div class="card" style="margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div><strong>${v.name || v.id}</strong><br><span style="font-size:11px;color:var(--text-muted);">${v.created_at || ''}</span></div>
+        <button class="btn btn-sm btn-secondary" onclick="restoreVersion('${v.id}')"><i class="fas fa-undo"></i> Restaurar</button>
+      </div>
+    </div>
+  `).join('');
 }
 
-async function runSensitivity() {
+async function saveVersion() {
   if (!state.companyId) return;
-  const variable = document.getElementById('sens-var').value;
-
+  const name = prompt('Nombre de la versión:');
+  if (!name) return;
   try {
-    const r = await fetch(`${API}/api/v2/companies/${state.companyId}/sensitivity`, {
+    await fetch(`${API}/api/v2/companies/${state.companyId}/cashflow-versions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ variable, range_pct: 30, steps: 7 })
+      body: JSON.stringify({ name })
     });
-    const data = await r.json();
-    renderSensitivityChart(data);
-  } catch(e) { alert('Error ejecutando análisis de sensibilidad'); }
+    notify('success', 'Versión guardada');
+    loadVersions();
+  } catch(e) { notify('error', 'Error guardando versión'); }
 }
 
-function renderSensitivityChart(data) {
-  const ctx = document.getElementById('chart-sensitivity');
-  if (state.charts.sensitivity) state.charts.sensitivity.destroy();
-
-  const results = data.results || [];
-  state.charts.sensitivity = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: results.map(r => `${r.cambio_pct > 0 ? '+' : ''}${r.cambio_pct}%`),
-      datasets: [{
-        label: 'Caja Final',
-        data: results.map(r => r.caja_final_promedio || r.caja_final),
-        borderColor: '#f59e0b',
-        backgroundColor: 'rgba(245,158,11,0.1)',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 4,
-      }]
-    },
-    options: chartOptions('Caja Final ($)')
-  });
+async function restoreVersion(versionId) {
+  if (!state.companyId) return;
+  try {
+    await fetch(`${API}/api/v2/companies/${state.companyId}/cashflow-versions/${versionId}/restore`, { method: 'PUT' });
+    notify('success', 'Versión restaurada');
+    loadCashflow();
+  } catch(e) { notify('error', 'Error restaurando versión'); }
 }
 
 // ============================================================================
 // Exportación
 // ============================================================================
-function exportExcel() {
+async function exportCSV() {
   if (!state.companyId) return;
-  window.open(`${API}/api/companies/${state.companyId}/export/excel`, '_blank');
+  try {
+    const r = await fetch(`${API}/api/companies/${state.companyId}/export/csv`);
+    const blob = await r.blob();
+    downloadBlob(blob, `cashflow_${state.companyName}.csv`);
+  } catch(e) { notify('error', 'Error exportando CSV'); }
 }
 
-function exportCSV() {
+async function exportExcel() {
   if (!state.companyId) return;
-  window.open(`${API}/api/companies/${state.companyId}/export/csv`, '_blank');
+  try {
+    const r = await fetch(`${API}/api/companies/${state.companyId}/export/excel`);
+    const blob = await r.blob();
+    downloadBlob(blob, `cashflow_${state.companyName}.xlsx`);
+  } catch(e) { notify('error', 'Error exportando Excel'); }
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
 // ============================================================================
@@ -987,51 +955,55 @@ async function loadSettings() {
   try {
     const r = await fetch(`${API}/api/agents`);
     const data = await r.json();
-    const list = document.getElementById('agents-list');
-    list.innerHTML = (data.agents || []).map(a =>
-      `<div style="display:flex; align-items:center; justify-content:space-between; padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
-        <div>
-          <div style="font-size:13px; font-weight:600;">${a.role || a.id}</div>
-          <div style="font-size:11px; color:var(--text-muted);">Modelo: ${a.model} | Temp: ${a.temperature}</div>
-        </div>
-      </div>`
-    ).join('');
-
-    const hr = await fetch(`${API}/api/hardware/performance`);
-    const hw = await hr.json();
-    const hwDiv = document.getElementById('hardware-info');
-    hwDiv.innerHTML = `
-      <div style="font-size:12px; color:var(--text-muted);">
-        <p>CPU: ${hw.hardware?.cpu_count || '?'} cores | RAM: ${hw.hardware?.ram_gb || '?'} GB | GPU: ${hw.hardware?.gpu_name || 'N/A'}</p>
+    document.getElementById('settingsContent').innerHTML = `
+      <div style="margin-top:12px;">
+        <div class="card-subtitle" style="margin-bottom:12px;">Agentes de IA configurados</div>
+        ${(data.agents || []).map(a => `
+          <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);">
+            <i class="fas fa-robot" style="color:var(--ccs-azul);"></i>
+            <div><strong style="font-size:13px;">${a.name}</strong><br><span style="font-size:11px;color:var(--text-muted);">${a.model} — ${a.description || ''}</span></div>
+          </div>
+        `).join('')}
       </div>
     `;
-  } catch(e) {}
+  } catch(e) {
+    document.getElementById('settingsContent').innerHTML = '<p style="color:var(--text-muted);">Error cargando configuración</p>';
+  }
 }
 
 // ============================================================================
 // Utilidades
 // ============================================================================
-function fmtMoney(n) {
-  return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 }).format(n);
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+function showGlobalLoading(label, sublabel) {
+  document.getElementById('globalLoadingLabel').textContent = label || 'Procesando...';
+  document.getElementById('globalLoadingSublabel').textContent = sublabel || '';
+  document.getElementById('globalLoadingOverlay').classList.add('active');
+}
+function hideGlobalLoading() { document.getElementById('globalLoadingOverlay').classList.remove('active'); }
+
+function notify(type, message) {
+  const area = document.getElementById('notificationArea');
+  const el = document.createElement('div');
+  el.className = `notification ${type}`;
+  el.innerHTML = `<span>${message}</span>`;
+  area.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
 }
 
-function fmtCompact(n) {
-  if (Math.abs(n) >= 1000000) return `$${(n / 1000000).toFixed(1)}M`;
-  if (Math.abs(n) >= 1000) return `$${(n / 1000).toFixed(0)}K`;
-  return `$${Math.round(n)}`;
+function formatCurrency(value) {
+  if (value === null || value === undefined) return '$0';
+  return '$' + Math.round(value).toLocaleString('es-CL');
 }
 
-function chartOptions(yLabel) {
-  return {
-    responsive: true,
-    interaction: { intersect: false, mode: 'index' },
-    scales: {
-      x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: 'rgba(100,116,139,0.1)' } },
-      y: { ticks: { color: '#64748b', font: { size: 10 }, callback: v => fmtCompact(v) }, grid: { color: 'rgba(100,116,139,0.1)' }, title: { display: !!yLabel, text: yLabel, color: '#64748b', font: { size: 10 } } }
-    },
-    plugins: {
-      legend: { labels: { color: '#94a3b8', font: { size: 11 } } },
-      tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y)}` } }
-    }
-  };
+function formatCurrencyShort(value) {
+  if (value === null || value === undefined) return '$0';
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(1) + 'B';
+  if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(1) + 'M';
+  if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(0) + 'K';
+  return sign + '$' + Math.round(abs).toLocaleString('es-CL');
 }
