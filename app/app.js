@@ -1165,21 +1165,76 @@ function downloadBlob(blob, filename) {
 // ============================================================================
 async function loadSettings() {
   try {
-    const r = await fetch(`${API}/api/agents`);
-    const data = await r.json();
+    const [agentsResp, modelsResp, statusResp] = await Promise.all([
+      fetch(`${API}/api/agents`),
+      fetch(`${API}/api/models/available`),
+      fetch(`${API}/api/health`).catch(() => ({ json: () => ({ status: 'unknown' }) }))
+    ]);
+    const agentsData = await agentsResp.json();
+    const modelsData = await modelsResp.json();
+    const healthData = await statusResp.json();
+
+    const models = modelsData.models || [];
+    const agents = agentsData.agents || [];
+
     document.getElementById('settingsContent').innerHTML = `
-      <div style="margin-top:12px;">
-        <div class="card-subtitle" style="margin-bottom:12px;">Agentes de IA configurados</div>
-        ${(data.agents || []).map(a => `
-          <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);">
-            <i class="fas fa-robot" style="color:var(--ccs-azul);"></i>
-            <div><strong style="font-size:13px;">${a.name}</strong><br><span style="font-size:11px;color:var(--text-muted);">${a.model} — ${a.description || ''}</span></div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; margin-top:12px;">
+        <!-- Estado del Sistema -->
+        <div class="card" style="padding:16px;">
+          <h4 style="margin:0 0 12px; font-size:13px; color:var(--ccs-azul-oscuro);"><i class="fas fa-server"></i> Estado del Sistema</h4>
+          <div style="font-size:12px; line-height:2;">
+            <div><strong>Ollama:</strong> <span style="color:${healthData.ollama ? 'var(--ccs-verde)' : '#EF4444'};">${healthData.ollama ? '\u2713 Conectado' : '\u2717 Desconectado'}</span></div>
+            <div><strong>Modelos disponibles:</strong> ${models.length}</div>
+            <div><strong>Agentes configurados:</strong> ${agents.length}</div>
+            <div><strong>Versi\u00f3n:</strong> 2.0.0</div>
           </div>
-        `).join('')}
+        </div>
+
+        <!-- Modelos Instalados -->
+        <div class="card" style="padding:16px;">
+          <h4 style="margin:0 0 12px; font-size:13px; color:var(--ccs-azul-oscuro);"><i class="fas fa-brain"></i> Modelos Instalados</h4>
+          <div style="display:flex; flex-wrap:wrap; gap:6px;">
+            ${models.length > 0 ? models.map(m => `
+              <span style="padding:4px 10px; background:rgba(13,61,166,0.06); border:1px solid rgba(13,61,166,0.15); border-radius:12px; font-size:11px; color:var(--ccs-azul);">${escapeHtml(m)}</span>
+            `).join('') : '<span style="color:var(--text-muted); font-size:12px;">No hay modelos instalados</span>'}
+          </div>
+        </div>
+
+        <!-- Acciones R\u00e1pidas -->
+        <div class="card" style="padding:16px;">
+          <h4 style="margin:0 0 12px; font-size:13px; color:var(--ccs-azul-oscuro);"><i class="fas fa-tools"></i> Acciones R\u00e1pidas</h4>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <button class="btn btn-sm" style="background:var(--ccs-azul); color:#fff; font-size:11px; padding:8px 12px; text-align:left;" onclick="resetTokenStats()">
+              <i class="fas fa-redo"></i> Resetear estad\u00edsticas de tokens
+            </button>
+            <button class="btn btn-sm" style="background:rgba(13,61,166,0.08); color:var(--ccs-azul); font-size:11px; padding:8px 12px; text-align:left;" onclick="navigateTo('agents')">
+              <i class="fas fa-robot"></i> Configurar agentes y prompts
+            </button>
+            <button class="btn btn-sm" style="background:rgba(13,61,166,0.08); color:var(--ccs-azul); font-size:11px; padding:8px 12px; text-align:left;" onclick="navigateTo('tokens')">
+              <i class="fas fa-chart-bar"></i> Ver uso de tokens
+            </button>
+          </div>
+        </div>
+
+        <!-- Resumen de Agentes -->
+        <div class="card" style="padding:16px;">
+          <h4 style="margin:0 0 12px; font-size:13px; color:var(--ccs-azul-oscuro);"><i class="fas fa-users-cog"></i> Agentes Activos</h4>
+          ${agents.map(a => `
+            <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border);">
+              <i class="fas fa-robot" style="color:var(--ccs-azul); font-size:12px;"></i>
+              <div style="flex:1;">
+                <div style="font-size:12px; font-weight:600;">${escapeHtml(a.name || a.id)}</div>
+                <div style="font-size:10px; color:var(--text-muted);">${escapeHtml(a.model || 'sin modelo')}</div>
+              </div>
+              <span style="font-size:10px; padding:2px 6px; background:rgba(61,174,43,0.1); color:var(--ccs-verde); border-radius:8px;">T:${a.temperature || 0.7}</span>
+            </div>
+          `).join('')}
+        </div>
       </div>
     `;
   } catch(e) {
-    document.getElementById('settingsContent').innerHTML = '<p style="color:var(--text-muted);">Error cargando configuración</p>';
+    console.error('[CCS] Error loading settings:', e);
+    document.getElementById('settingsContent').innerHTML = '<p style="color:var(--text-muted);">Error cargando configuraci\u00f3n: ' + e.message + '</p>';
   }
 }
 
@@ -1221,107 +1276,195 @@ function formatCurrencyShort(value) {
 }
 
 // ============================================================================
-// Agentes & Skills
+// Agentes & Skills (estilo brand-assistant)
 // ============================================================================
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 async function loadAgents() {
+  const grid = document.getElementById('agentsGrid');
   try {
     const r = await fetch(`${API}/api/agents`);
     const data = await r.json();
     const agents = data.agents || [];
-    const grid = document.getElementById('agentsGrid');
 
-    grid.innerHTML = agents.map(agent => `
-      <div class="card" style="padding:16px;" id="agent-card-${agent.id}">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-          <div style="width:36px; height:36px; border-radius:50%; background:var(--ccs-azul); display:flex; align-items:center; justify-content:center;">
-            <i class="fas fa-robot" style="color:#fff; font-size:14px;"></i>
-          </div>
-          <div>
-            <div style="font-weight:700; font-size:13px; color:var(--ccs-azul-oscuro);">${agent.name || agent.id}</div>
-            <div style="font-size:11px; color:var(--text-muted);">${agent.description || 'Agente del sistema'}</div>
-          </div>
-        </div>
-        <div class="form-group" style="margin-bottom:8px;">
-          <label style="font-size:11px;">Modelo</label>
-          <input type="text" value="${agent.model || 'llama3.2:3b'}" id="agent-model-${agent.id}" style="font-size:12px; padding:6px 10px;">
-        </div>
-        <div class="form-group" style="margin-bottom:8px;">
-          <label style="font-size:11px;">Temperatura</label>
-          <input type="range" min="0" max="1" step="0.1" value="${agent.temperature || 0.7}" id="agent-temp-${agent.id}" oninput="document.getElementById('agent-temp-val-${agent.id}').textContent=this.value">
-          <span id="agent-temp-val-${agent.id}" style="font-size:11px; color:var(--text-muted);">${agent.temperature || 0.7}</span>
-        </div>
-        <div class="form-group" style="margin-bottom:8px;">
-          <label style="font-size:11px;">System Prompt (resumen)</label>
-          <textarea id="agent-prompt-${agent.id}" rows="3" style="font-size:11px; padding:6px 10px; resize:vertical;">${(agent.system_prompt || '').substring(0, 500)}</textarea>
-        </div>
-        <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          ${(agent.skills || []).map(s => `<span style="padding:2px 8px; background:#f0f4ff; border-radius:10px; font-size:10px; color:var(--ccs-azul);">${s}</span>`).join('')}
-        </div>
-      </div>
-    `).join('');
+    let html = '';
+    for (const agent of agents) {
+      const agentId = agent.id;
+      const skills = agent.skills || [];
+      const skillContents = agent.skill_contents || {};
+
+      html += `<div class="card" style="padding:20px;" id="agent-card-${agentId}">`;
+      // Header
+      html += `<div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:16px;">`;
+      html += `<div style="display:flex; align-items:center; gap:12px;">`;
+      html += `<div style="width:40px; height:40px; border-radius:50%; background:var(--ccs-azul); display:flex; align-items:center; justify-content:center;"><i class="fas fa-robot" style="color:#fff; font-size:16px;"></i></div>`;
+      html += `<div><div style="font-weight:700; font-size:14px; color:var(--ccs-azul-oscuro);">${escapeHtml(agent.name || agentId)}</div>`;
+      html += `<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">${escapeHtml(agent.description || '')}</div></div>`;
+      html += `</div>`;
+      html += `<span style="padding:3px 10px; background:rgba(61,174,43,0.1); color:var(--ccs-verde); border-radius:12px; font-size:10px; font-weight:600;">${escapeHtml(agent.role || 'agent')}</span>`;
+      html += `</div>`;
+
+      // Model & Temperature
+      html += `<div style="display:flex; gap:16px; margin-bottom:16px; flex-wrap:wrap;">`;
+      html += `<div class="form-group" style="flex:1; min-width:180px;"><label style="font-size:11px;">Modelo</label>`;
+      html += `<input type="text" id="agent-model-${agentId}" value="${escapeHtml(agent.model || 'llama3.2:3b')}" style="font-size:12px;"></div>`;
+      html += `<div class="form-group" style="width:100px;"><label style="font-size:11px;">Temperatura</label>`;
+      html += `<input type="number" id="agent-temp-${agentId}" value="${agent.temperature || 0.7}" min="0" max="2" step="0.1" style="font-size:12px;"></div>`;
+      html += `</div>`;
+
+      // System Prompt (completo, editable)
+      html += `<div style="margin-bottom:16px;">`;
+      html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">`;
+      html += `<label style="margin:0; font-size:11px; font-weight:600;">System Prompt</label>`;
+      html += `<button class="btn btn-sm" style="background:var(--ccs-azul); color:#fff; font-size:11px; padding:4px 12px;" onclick="saveAgentPrompt('${agentId}')">Guardar</button>`;
+      html += `</div>`;
+      html += `<textarea id="agent-prompt-${agentId}" style="min-height:180px; font-size:11px; font-family:monospace; line-height:1.5; padding:10px; resize:vertical;">${escapeHtml(agent.system_prompt || '')}</textarea>`;
+      html += `</div>`;
+
+      // Skills editables
+      if (skills.length > 0) {
+        html += `<div><label style="margin-bottom:8px; display:block; font-size:11px; font-weight:600;">Skills (${skills.length})</label>`;
+        html += `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">`;
+        for (const sname of skills) {
+          html += `<button class="btn btn-sm" style="background:rgba(13,61,166,0.08); color:var(--ccs-azul); border:1px solid rgba(13,61,166,0.2); font-size:10px;" onclick="toggleSkillEditor('${agentId}','${sname}')">&#9998; ${escapeHtml(sname)}</button>`;
+        }
+        html += `</div>`;
+
+        // Skill editors (hidden)
+        for (const skillName of skills) {
+          const skillContent = skillContents[skillName] || '';
+          html += `<div id="skillEditor_${agentId}_${skillName}" style="display:none; margin-bottom:12px; padding:12px; background:var(--bg-base); border-radius:8px; border:1px solid var(--border);">`;
+          html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">`;
+          html += `<div style="font-size:11px; font-weight:700; color:var(--ccs-azul);">${escapeHtml(skillName)}.md</div>`;
+          html += `<div style="display:flex; gap:6px;">`;
+          html += `<button class="btn btn-sm" style="background:var(--ccs-azul); color:#fff; font-size:10px; padding:3px 10px;" onclick="saveSkillContent('${agentId}','${skillName}')">Guardar</button>`;
+          html += `<button class="btn btn-sm" style="font-size:10px; padding:3px 10px;" onclick="toggleSkillEditor('${agentId}','${skillName}')">Cerrar</button>`;
+          html += `</div></div>`;
+          html += `<textarea id="skill_${agentId}_${skillName}" style="min-height:200px; font-size:11px; font-family:monospace; line-height:1.5; padding:8px;" placeholder="Escribe el contenido del skill...">${escapeHtml(skillContent)}</textarea>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+      }
+
+      html += `</div>`; // /card
+    }
+
+    grid.innerHTML = html;
   } catch(e) {
     console.error('[CCS] Error loading agents:', e);
-    document.getElementById('agentsGrid').innerHTML = '<div class="card"><p style="color:var(--text-muted);">Error cargando agentes</p></div>';
+    grid.innerHTML = '<div class="card" style="padding:20px;"><p style="color:var(--text-muted);">Error cargando agentes: ' + e.message + '</p></div>';
   }
 }
 
-async function saveAgents() {
+function toggleSkillEditor(agentId, skillName) {
+  const el = document.getElementById(`skillEditor_${agentId}_${skillName}`);
+  if (!el) return;
+  el.style.display = (el.style.display === 'none' || el.style.display === '') ? 'block' : 'none';
+}
+
+async function saveSkillContent(agentId, skillName) {
+  const el = document.getElementById(`skill_${agentId}_${skillName}`);
+  if (!el) return;
   try {
-    const r = await fetch(`${API}/api/agents`);
-    const data = await r.json();
-    const agents = data.agents || [];
-
-    const updates = agents.map(agent => ({
-      id: agent.id,
-      model: document.getElementById(`agent-model-${agent.id}`)?.value || agent.model,
-      temperature: parseFloat(document.getElementById(`agent-temp-${agent.id}`)?.value || agent.temperature),
-      system_prompt: document.getElementById(`agent-prompt-${agent.id}`)?.value || agent.system_prompt,
-    }));
-
-    const resp = await fetch(`${API}/api/agents`, {
+    const resp = await fetch(`${API}/api/agents/${agentId}/skills/${skillName}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agents: updates })
+      body: JSON.stringify({ content: el.value })
     });
-
     if (resp.ok) {
-      notify('success', 'Agentes actualizados correctamente');
+      notify('success', `Skill "${skillName}" guardado correctamente`);
     } else {
-      notify('error', 'Error guardando agentes');
+      notify('error', 'Error guardando skill');
     }
   } catch(e) {
-    console.error('[CCS] Error saving agents:', e);
-    notify('error', 'Error guardando agentes');
+    notify('error', 'Error: ' + e.message);
   }
 }
 
+async function saveAgentPrompt(agentId) {
+  const promptEl = document.getElementById(`agent-prompt-${agentId}`);
+  const modelEl = document.getElementById(`agent-model-${agentId}`);
+  const tempEl = document.getElementById(`agent-temp-${agentId}`);
+  if (!promptEl) return;
+
+  const payload = { system_prompt: promptEl.value };
+  if (modelEl) payload.model = modelEl.value.trim();
+  if (tempEl) payload.temperature = parseFloat(tempEl.value) || 0.7;
+
+  try {
+    const resp = await fetch(`${API}/api/agents/${agentId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if (data.pull_status && data.pull_status.status === 'queued') {
+      notify('info', `Descargando modelo "${payload.model}"... Esto puede tardar.`);
+    } else {
+      notify('success', `Agente "${agentId}" actualizado correctamente`);
+    }
+  } catch(e) {
+    notify('error', 'Error: ' + e.message);
+  }
+}
+
+// Legacy function for backward compat
+async function saveAgents() {
+  // Now each agent saves individually via saveAgentPrompt
+  notify('info', 'Usa el bot\u00f3n "Guardar" de cada agente para guardar cambios individuales.');
+}
+
 // ============================================================================
-// Uso de Tokens
+// Uso de Tokens y Auditoría (estilo brand-assistant)
 // ============================================================================
+function _formatNumber(n) {
+  if (!n && n !== 0) return '0';
+  return Number(n).toLocaleString('es-CL');
+}
+
+function _formatLatency(ms) {
+  if (!ms) return '-';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return ms + 'ms';
+}
+
 async function loadTokenStats() {
   try {
-    const r = await fetch(`${API}/api/token-usage`);
-    const data = await r.json();
+    // Cargar tanto token-usage como audit
+    const [tokenResp, auditResp] = await Promise.all([
+      fetch(`${API}/api/token-usage`),
+      fetch(`${API}/api/audit`)
+    ]);
+    const tokenData = await tokenResp.json();
+    const auditData = await auditResp.json();
 
-    const stats = data.stats || { total_tokens: 0, total_requests: 0, by_agent: {} };
+    const stats = tokenData.stats || { total_tokens: 0, total_requests: 0, by_agent: {} };
+    const entries = auditData.entries || [];
+
+    // Calcular ahorro estimado (costo OpenAI GPT-4 vs local)
+    const costPerToken = 0.00003; // USD por token GPT-4
+    const estimatedSaving = stats.total_tokens * costPerToken;
 
     // Stats cards
     document.getElementById('tokenStats').innerHTML = `
       <div class="stat-card blue">
         <div class="stat-label">Total Tokens</div>
-        <div class="stat-value">${(stats.total_tokens || 0).toLocaleString()}</div>
+        <div class="stat-value">${_formatNumber(stats.total_tokens)}</div>
       </div>
       <div class="stat-card green">
         <div class="stat-label">Solicitudes</div>
-        <div class="stat-value">${stats.total_requests || 0}</div>
+        <div class="stat-value">${_formatNumber(stats.total_requests)}</div>
       </div>
       <div class="stat-card celeste">
         <div class="stat-label">Promedio/Solicitud</div>
-        <div class="stat-value">${stats.total_requests ? Math.round(stats.total_tokens / stats.total_requests).toLocaleString() : 0}</div>
+        <div class="stat-value">${stats.total_requests ? _formatNumber(Math.round(stats.total_tokens / stats.total_requests)) : '0'}</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Sesiones Activas</div>
-        <div class="stat-value">${stats.active_sessions || 0}</div>
+      <div class="stat-card" style="border-left:3px solid var(--ccs-verde);">
+        <div class="stat-label">Ahorro estimado (vs GPT-4)</div>
+        <div class="stat-value" style="color:var(--ccs-verde);">$${estimatedSaving.toFixed(2)} USD</div>
       </div>
     `;
 
@@ -1332,34 +1475,66 @@ async function loadTokenStats() {
 
     const ctx = document.getElementById('chartTokens');
     if (state.charts.tokens) state.charts.tokens.destroy();
-    state.charts.tokens = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels: agentNames.map(n => n.replace(/_/g, ' ')),
-        datasets: [{
-          label: 'Tokens usados',
-          data: agentTokens,
-          backgroundColor: ['#0D3DA6', '#3A6DDE', '#3DAE2B', '#F59E0B', '#EF4444'],
-        }]
-      },
-      options: {
-        responsive: true,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { callback: v => v.toLocaleString() } } }
-      }
-    });
+    if (agentNames.length > 0) {
+      state.charts.tokens = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: agentNames.map(n => n.replace(/_/g, ' ')),
+          datasets: [{
+            label: 'Tokens usados',
+            data: agentTokens,
+            backgroundColor: ['#0D3DA6', '#3A6DDE', '#3DAE2B', '#F59E0B', '#EF4444', '#8B5CF6'],
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true, ticks: { callback: v => _formatNumber(v) } } }
+        }
+      });
+    }
 
-    // Sessions list
-    const sessions = data.recent_sessions || [];
-    document.getElementById('tokenSessionsList').innerHTML = sessions.length
-      ? sessions.map(s => `
-        <div style="display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--border); font-size:12px;">
-          <span style="font-weight:600; color:var(--ccs-azul-oscuro);">${s.agent || 'unknown'}</span>
-          <span style="color:var(--text-muted);">${s.tokens?.toLocaleString() || 0} tokens</span>
-          <span style="color:var(--text-muted);">${s.timestamp ? new Date(s.timestamp).toLocaleString('es-CL') : ''}</span>
+    // Audit table (estilo brand-assistant)
+    let tableHtml = '';
+    if (entries.length > 0) {
+      tableHtml = `
+        <div style="margin-top:20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h4 style="margin:0; font-size:14px; color:var(--ccs-azul-oscuro);"><i class="fas fa-list"></i> Registro de Actividad</h4>
+            <span style="font-size:11px; color:var(--text-muted);">${entries.length} entradas</span>
+          </div>
+          <div style="overflow-x:auto; border:1px solid var(--border); border-radius:8px;">
+            <table style="width:100%; border-collapse:collapse; font-size:11px;">
+              <thead>
+                <tr style="background:var(--bg-base); border-bottom:1px solid var(--border);">
+                  <th style="padding:8px 10px; text-align:left; font-weight:600;">Hora</th>
+                  <th style="padding:8px 10px; text-align:left; font-weight:600;">Agente</th>
+                  <th style="padding:8px 10px; text-align:left; font-weight:600;">Tarea</th>
+                  <th style="padding:8px 10px; text-align:left; font-weight:600;">Modelo</th>
+                  <th style="padding:8px 10px; text-align:right; font-weight:600;">Latencia</th>
+                  <th style="padding:8px 10px; text-align:center; font-weight:600;">Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${entries.slice(0, 50).map(e => `
+                  <tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:6px 10px; color:var(--text-muted);">${e.timestamp ? new Date(e.timestamp).toLocaleString('es-CL', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '-'}</td>
+                    <td style="padding:6px 10px; font-weight:600; color:var(--ccs-azul);">${escapeHtml((e.agent_id || '').replace(/_/g, ' '))}</td>
+                    <td style="padding:6px 10px;">${escapeHtml(e.task || '')}</td>
+                    <td style="padding:6px 10px; color:var(--text-muted);">${escapeHtml(e.model || '')}</td>
+                    <td style="padding:6px 10px; text-align:right;">${_formatLatency(e.latency_ms)}</td>
+                    <td style="padding:6px 10px; text-align:center;">${e.success ? '<span style="color:var(--ccs-verde);">\u2713</span>' : '<span style="color:#EF4444;">\u2717</span>'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
         </div>
-      `).join('')
-      : '<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px;">No hay sesiones registradas a\u00fan</div>';
+      `;
+    } else {
+      tableHtml = '<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px; margin-top:16px;">No hay actividad registrada a\u00fan. Las llamadas a los agentes aparecer\u00e1n aqu\u00ed.</div>';
+    }
+    document.getElementById('tokenSessionsList').innerHTML = tableHtml;
 
   } catch(e) {
     console.error('[CCS] Error loading token stats:', e);
@@ -1367,13 +1542,13 @@ async function loadTokenStats() {
       <div class="stat-card"><div class="stat-label">Total Tokens</div><div class="stat-value">0</div></div>
       <div class="stat-card"><div class="stat-label">Solicitudes</div><div class="stat-value">0</div></div>
       <div class="stat-card"><div class="stat-label">Promedio</div><div class="stat-value">0</div></div>
-      <div class="stat-card"><div class="stat-label">Sesiones</div><div class="stat-value">0</div></div>
+      <div class="stat-card"><div class="stat-label">Ahorro</div><div class="stat-value">$0</div></div>
     `;
   }
 }
 
 async function resetTokenStats() {
-  if (!confirm('\u00bfResetear estad\u00edsticas de tokens?')) return;
+  if (!confirm('\u00bfResetear estad\u00edsticas de tokens y auditor\u00eda?')) return;
   try {
     await fetch(`${API}/api/token-usage`, { method: 'DELETE' });
     notify('success', 'Estad\u00edsticas reseteadas');

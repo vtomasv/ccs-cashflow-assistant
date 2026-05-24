@@ -577,14 +577,26 @@ SEGURIDAD — REGLAS INQUEBRANTABLES:
         pct_patterns = re.findall(r'(\d+(?:[.,]\d+)?)\s*%', msg_lower)
         percentages = [float(p.replace(",", ".")) for p in pct_patterns]
 
-        # Detectar productos (listas separadas por comas o "y")
-        if any(word in msg_lower for word in ["vendo", "vendemos", "ofrecemos", "productos", "servicios", "hacemos", "fabricamos"]):
+        # Detectar productos (listas separadas por comas o "y", o respuestas cortas de chips)
+        product_trigger_words = ["vendo", "vendemos", "ofrecemos", "productos", "servicios", "hacemos", "fabricamos"]
+        # Si es una respuesta corta (chip clickeado) y estamos en tema de productos
+        is_short_product_answer = len(msg_lower.split()) <= 6 and not numbers and not percentages
+        if any(word in msg_lower for word in product_trigger_words) or is_short_product_answer:
             products_match = re.findall(r'(?:vendo|vendemos|ofrecemos|hacemos|fabricamos|productos?|servicios?)\s*(?:como\s+)?(.+?)(?:\.|$)', msg_lower)
             if products_match:
                 products_text = products_match[0]
                 products = [p.strip() for p in re.split(r'[,y]', products_text) if p.strip() and len(p.strip()) > 2]
                 if products:
                     extracted["products"] = products
+            elif is_short_product_answer and len(msg_lower) > 3:
+                # Respuesta corta tipo chip: "Pan artesanal", "Pan de masa madre"
+                # Verificar que no sea un número o porcentaje
+                existing_products = self.collected_data.get("products", [])
+                if isinstance(existing_products, list):
+                    existing_products.append(user_message.strip())
+                else:
+                    existing_products = [user_message.strip()]
+                extracted["products"] = existing_products
 
         # Detectar precios
         if any(word in msg_lower for word in ["precio", "cobro", "cuesta", "vale", "ticket"]) and numbers:
@@ -767,14 +779,27 @@ SEGURIDAD — REGLAS INQUEBRANTABLES:
 
         return notifications
 
-    def get_suggested_responses(self) -> List[dict]:
+    def get_suggested_responses(self, assistant_response: str = "") -> List[dict]:
         """
-        Genera respuestas sugeridas clickeables para el usuario
-        basadas en el próximo tema pendiente.
+        Genera respuestas sugeridas clickeables para el usuario.
+        Prioriza extraer opciones de la respuesta del LLM, y si no hay,
+        usa las opciones contextuales del próximo tema pendiente.
         """
-        next_questions = self.get_next_questions(3)
         suggestions = []
 
+        # 1. Intentar extraer opciones de la respuesta del LLM
+        llm_options = self._extract_options_from_response(assistant_response)
+        if llm_options:
+            suggestions.append({
+                "topic_id": "from_llm",
+                "category": "contextual",
+                "question": "Opciones sugeridas:",
+                "options": llm_options[:8],
+            })
+            return suggestions
+
+        # 2. Si no hay opciones del LLM, usar las del próximo tema pendiente
+        next_questions = self.get_next_questions(2)
         for q in next_questions:
             options = q.get("quick_options", [])
             if options:
@@ -782,7 +807,64 @@ SEGURIDAD — REGLAS INQUEBRANTABLES:
                     "topic_id": q["id"],
                     "category": q["category"],
                     "question": q["question"],
-                    "options": options[:6],  # Máximo 6 opciones
+                    "options": options[:6],
                 })
+                break  # Solo mostrar un grupo de chips a la vez
 
         return suggestions
+
+    def _extract_options_from_response(self, response: str) -> List[str]:
+        """
+        Extrae opciones/alternativas mencionadas en la respuesta del LLM.
+        Busca patrones como listas, opciones entre paréntesis, o preguntas con alternativas.
+        """
+        if not response:
+            return []
+
+        options = []
+
+        # Patrón 1: Opciones entre paréntesis separadas por comas o 'o'
+        # Ej: "(venta directa, suscripción, por proyecto)"
+        paren_matches = re.findall(r'\(([^)]+)\)', response)
+        for match in paren_matches:
+            parts = re.split(r'[,;]|\bo\b', match)
+            for p in parts:
+                p = p.strip().strip('?').strip()
+                if 3 < len(p) < 40 and not p.startswith('¿'):
+                    options.append(p.capitalize())
+
+        # Patrón 2: Preguntas con alternativas "X o Y o Z"
+        # Ej: "¿Es venta directa, suscripción o por proyecto?"
+        alt_match = re.findall(r'\?([^?]*(?:,|\bo\b)[^?]*)\?', response)
+        if not alt_match:
+            # Buscar en la última oración interrogativa
+            sentences = response.split('?')
+            for sent in reversed(sentences):
+                if ',' in sent or ' o ' in sent:
+                    parts = re.split(r'[,]|\bo\b', sent)
+                    for p in parts:
+                        p = p.strip().strip('?').strip()
+                        # Limpiar prefijos de pregunta
+                        p = re.sub(r'^.*¿', '', p)
+                        if 3 < len(p) < 40 and not any(c in p for c in ['¿', '\n']):
+                            options.append(p.capitalize())
+                    if options:
+                        break
+
+        # Patrón 3: Listas numeradas o con viñetas
+        list_items = re.findall(r'(?:^|\n)\s*(?:\d+[.)\-]|[-•◦])\s*(.+)', response)
+        for item in list_items:
+            item = item.strip().rstrip('.')
+            if 3 < len(item) < 50:
+                options.append(item)
+
+        # Deduplicar y limitar
+        seen = set()
+        unique_options = []
+        for opt in options:
+            opt_lower = opt.lower()
+            if opt_lower not in seen and len(opt) > 3:
+                seen.add(opt_lower)
+                unique_options.append(opt)
+
+        return unique_options[:8]

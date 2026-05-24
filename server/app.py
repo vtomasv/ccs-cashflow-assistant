@@ -223,6 +223,34 @@ def load_json(path: Path, default=None):
     return default if default is not None else {}
 
 # ---------------------------------------------------------------------------
+# Auditoría de llamadas LLM
+# ---------------------------------------------------------------------------
+def _log_audit_entry(agent_id: str, task: str, model: str, inputs_summary: str,
+                     output_summary: str, latency_ms: int, success: bool, error: str = ""):
+    """Registra una entrada de auditoría para trazabilidad de agentes."""
+    import uuid as _uuid
+    entry = {
+        "id": str(_uuid.uuid4()),
+        "timestamp": datetime.now().isoformat(),
+        "agent_id": agent_id,
+        "task": task,
+        "model": model,
+        "inputs_summary": inputs_summary[:500],
+        "output_summary": output_summary[:500] if output_summary else "",
+        "latency_ms": latency_ms,
+        "success": success,
+        "error": error,
+    }
+    audit_dir = DATA_DIR / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    audit_file = audit_dir / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+    try:
+        with open(audit_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning(f"[AUDIT] Error escribiendo audit: {e}")
+
+# ---------------------------------------------------------------------------
 # Utilidades de Ollama con auto-recuperación
 # ---------------------------------------------------------------------------
 def _fix_encoding(text: str) -> str:
@@ -402,19 +430,41 @@ def call_ollama_chat(model: str, messages: list, temperature: float = 0.7, timeo
         resp.raise_for_status()
         resp_data = resp.json()
         content = resp_data["message"]["content"]
-        # Track token usage
+        # Track token usage y audit
+        import time as _time
+        latency_ms = int((resp.elapsed.total_seconds()) * 1000) if hasattr(resp, 'elapsed') else 0
         try:
             total_tokens = resp_data.get("eval_count", 0) + resp_data.get("prompt_eval_count", 0)
+            agent_hint = "unknown"
+            task_hint = "chat"
+            for m in messages:
+                if m.get("role") == "system":
+                    sys_content = m["content"].lower()
+                    if "entrevista" in sys_content or "financiero" in sys_content:
+                        agent_hint = "financial_interviewer"
+                        task_hint = "interview"
+                    elif "cashflow" in sys_content or "flujo" in sys_content:
+                        agent_hint = "cashflow_analyst"
+                        task_hint = "cashflow_generation"
+                    elif "simulador" in sys_content or "escenario" in sys_content:
+                        agent_hint = "scenario_simulator"
+                        task_hint = "simulation"
+                    elif "extractor" in sys_content or "datos" in sys_content:
+                        agent_hint = "data_extractor"
+                        task_hint = "data_extraction"
+                    break
             if total_tokens > 0:
-                agent_hint = "unknown"
-                for m in messages:
-                    if m.get("role") == "system":
-                        if "entrevista" in m["content"].lower() or "financiero" in m["content"].lower():
-                            agent_hint = "financial_interviewer"
-                        elif "cashflow" in m["content"].lower() or "flujo" in m["content"].lower():
-                            agent_hint = "cashflow_analyst"
-                        break
                 track_token_usage(agent_hint, total_tokens)
+            # Log audit entry
+            _log_audit_entry(
+                agent_id=agent_hint,
+                task=task_hint,
+                model=model,
+                inputs_summary=messages[-1].get("content", "")[:500] if messages else "",
+                output_summary=content[:500],
+                latency_ms=latency_ms,
+                success=True
+            )
         except Exception:
             pass
         return _fix_encoding(content)
@@ -1353,9 +1403,12 @@ async def chat_interview(data: ChatMessage):
         company["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "company.json", company)
 
-    # Calcular progreso y sugerencias
+    # Extraer datos también de la respuesta del LLM (puede contener datos implícitos)
+    im.extract_data_from_response(response, "")
+
+    # Calcular progreso y sugerencias dinámicas basadas en la respuesta
     progress = im.get_interview_progress()
-    suggestions = im.get_suggested_responses()
+    suggestions = im.get_suggested_responses(assistant_response=response)
 
     return {
         "response": response,
@@ -2143,7 +2196,39 @@ async def export_scenario_excel(scenario_id: str):
 # ---------------------------------------------------------------------------
 @app.get("/api/agents")
 async def list_agents():
-    return get_agents()
+    """Lista agentes con system_prompt real desde disco y contenido de skills."""
+    agents_data = get_agents()
+
+    # Enriquecer cada agente con el prompt real y skills
+    for agent in agents_data.get("agents", []):
+        agent_id = agent.get("id", "")
+
+        # 1. Leer system_prompt real desde disco
+        prompt_file = DATA_DIR / "prompts" / "system" / f"{agent_id}.md"
+        if prompt_file.exists():
+            agent["system_prompt"] = prompt_file.read_text(encoding="utf-8")
+        elif not agent.get("system_prompt"):
+            default_prompt = DEFAULTS_DIR / "prompts" / f"{agent_id}.md"
+            if default_prompt.exists():
+                agent["system_prompt"] = default_prompt.read_text(encoding="utf-8")
+
+        # 2. Leer contenido de cada skill file
+        skill_contents = {}
+        for skill_name in agent.get("skills", []):
+            skill_paths = [
+                DATA_DIR / "prompts" / "skills" / f"{skill_name}.md",
+                DEFAULTS_DIR / "prompts" / f"{skill_name}.md",
+            ]
+            for sp in skill_paths:
+                if sp.exists():
+                    skill_contents[skill_name] = sp.read_text(encoding="utf-8")
+                    break
+            else:
+                skill_contents[skill_name] = ""
+
+        agent["skill_contents"] = skill_contents
+
+    return agents_data
 
 @app.get("/api/agents/{agent_id}")
 async def get_agent_endpoint(agent_id: str):
@@ -2159,11 +2244,18 @@ async def update_agent(agent_id: str, config: AgentConfigUpdate):
     for i, a in enumerate(agents_data.get("agents", [])):
         if a["id"] == agent_id:
             if config.model is not None:
+                old_model = agents_data["agents"][i].get("model", "")
                 agents_data["agents"][i]["model"] = config.model
             if config.temperature is not None:
                 agents_data["agents"][i]["temperature"] = config.temperature
             if config.system_prompt is not None:
+                # Guardar prompt en disco (como brand-assistant)
+                prompt_dir = DATA_DIR / "prompts" / "system"
+                prompt_dir.mkdir(parents=True, exist_ok=True)
+                prompt_file = prompt_dir / f"{agent_id}.md"
+                prompt_file.write_text(config.system_prompt, encoding="utf-8")
                 agents_data["agents"][i]["system_prompt"] = config.system_prompt
+                logger.info(f"[AGENTS] Prompt de '{agent_id}' guardado en disco ({len(config.system_prompt)} chars)")
             agents_data["agents"][i]["updated_at"] = datetime.now().isoformat()
             save_json(DATA_DIR / "agents" / "agents.json", agents_data)
 
@@ -2173,6 +2265,33 @@ async def update_agent(agent_id: str, config: AgentConfigUpdate):
                 return {**agents_data["agents"][i], "pull_status": {"status": "queued", "model": model}}
             return agents_data["agents"][i]
     raise HTTPException(404, "Agente no encontrado")
+
+@app.put("/api/agents/{agent_id}/skills/{skill_name}")
+async def update_skill_content(agent_id: str, skill_name: str, request: Request):
+    """Guarda el contenido editado de un skill file."""
+    body = await request.json()
+    content = body.get("content", "")
+    skills_dir = DATA_DIR / "prompts" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    skill_file = skills_dir / f"{re.sub(r'[^a-zA-Z0-9_-]', '', skill_name)}.md"
+    skill_file.write_text(content, encoding="utf-8")
+    logger.info(f"[SKILLS] Skill '{skill_name}' guardado ({len(content)} chars)")
+    return {"ok": True, "skill": skill_name, "agent_id": agent_id, "size": len(content)}
+
+@app.get("/api/audit")
+async def get_audit_log():
+    """Retorna el log de auditoría con estimación de tokens y ahorro."""
+    audit_dir = DATA_DIR / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for audit_file in sorted(audit_dir.glob("*.jsonl"), reverse=True)[:3]:
+        for line in audit_file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return {"entries": entries[:100], "total": len(entries)}
 
 @app.get("/api/models/status")
 async def models_status():
