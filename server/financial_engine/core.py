@@ -230,7 +230,18 @@ class CashflowModel:
             variable_costs = adjusted_sales * vcp
         else:
             variable_costs = adjusted_sales * 0.4  # Default 40%
-        fixed_costs = self.profile.fixed_costs_monthly + self.profile.salaries_monthly
+        # fixed_costs_monthly puede venir como dict (desglosado) o como número
+        fc = self.profile.fixed_costs_monthly
+        if isinstance(fc, dict):
+            fixed_costs = sum(fc.values()) if fc else 0.0
+        else:
+            fixed_costs = float(fc) if fc else 0.0
+        
+        sal = self.profile.salaries_monthly
+        if isinstance(sal, dict):
+            fixed_costs += sum(sal.values()) if sal else 0.0
+        else:
+            fixed_costs += float(sal) if sal else 0.0
 
         # Inflación en costos fijos (si hay datos de mercado)
         inflation_annual = self.profile.market_data.get("inflation_annual_pct", 0)

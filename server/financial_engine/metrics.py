@@ -380,8 +380,8 @@ class FinancialMetrics:
         runway_data = self.runway()
         break_even = self.break_even_operativo()
 
-        if necesidad["necesita_financiamiento"]:
-            monto = necesidad["monto_con_colchon"]
+        if necesidad.get("necesita_financiamiento", False):
+            monto = necesidad.get("monto_con_colchon", 0)
 
             # Línea de crédito si el déficit es temporal
             meses_negativos = sum(1 for m in self.months if m.cumulative_balance < 0)
@@ -402,21 +402,25 @@ class FinancialMetrics:
                     "prioridad": "alta",
                 })
 
-        if not runway_data["es_rentable"] and runway_data["meses"] < 6:
+        if not runway_data.get("es_rentable", True) and runway_data.get("meses", 999) < 6:
+            burn_rate = runway_data.get("burn_rate_mensual", 0)
+            runway_meses = runway_data.get("meses", 0)
             recomendaciones.append({
                 "tipo": "inyeccion_capital",
                 "titulo": "Inyección de Capital Urgente",
-                "monto_sugerido": round(runway_data["burn_rate_mensual"] * 6, 0),
-                "razon": f"Runway de solo {runway_data['meses']:.1f} meses. Se necesita capital para al menos 6 meses de operación.",
+                "monto_sugerido": round(burn_rate * 6, 0),
+                "razon": f"Runway de solo {runway_meses:.1f} meses. Se necesita capital para al menos 6 meses de operación.",
                 "prioridad": "critica",
             })
 
-        if not break_even["alcanzado"]:
+        if not break_even.get("alcanzado", True):
+            ventas_act = break_even.get('ventas_mensuales_actuales', 0)
+            ventas_nec = break_even.get('ventas_mensuales_necesarias', 0)
             recomendaciones.append({
                 "tipo": "optimizacion_costos",
                 "titulo": "Reducción de Costos o Aumento de Precios",
                 "monto_sugerido": 0,
-                "razon": f"Las ventas actuales (${break_even['ventas_mensuales_actuales']:,.0f}) están por debajo del break-even (${break_even['ventas_mensuales_necesarias']:,.0f}).",
+                "razon": f"Las ventas actuales (${ventas_act:,.0f}) están por debajo del break-even (${ventas_nec:,.0f})." if ventas_act and ventas_nec else "Las ventas no alcanzan el punto de equilibrio.",
                 "prioridad": "alta",
             })
 
