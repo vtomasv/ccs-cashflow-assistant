@@ -103,6 +103,8 @@ function navigateTo(page) {
     montecarlo: 'Simulación Monte Carlo',
     scenarios: 'Escenarios y Versiones',
     metrics: 'Métricas Financieras',
+    agents: 'Agentes & Skills',
+    tokens: 'Uso de Tokens',
     settings: 'Configuración',
   };
   document.getElementById('pageTitle').textContent = titles[page] || page;
@@ -112,6 +114,8 @@ function navigateTo(page) {
   if (page === 'scenarios' && state.companyId) loadVersions();
   if (page === 'metrics' && state.companyId) loadMetrics();
   if (page === 'simulation' && state.companyId) renderSimulationControls();
+  if (page === 'agents') loadAgents();
+  if (page === 'tokens') loadTokenStats();
   if (page === 'settings') loadSettings();
 }
 
@@ -395,6 +399,7 @@ async function sendMessage() {
   input.value = '';
   input.style.height = 'auto';
   addChatBubble('user', msg);
+  clearSuggestionChips();
 
   // Show typing indicator
   const typingId = showTyping();
@@ -411,13 +416,92 @@ async function sendMessage() {
     removeTyping(typingId);
     addChatBubble('assistant', data.response);
 
-    // Show generate button
-    document.getElementById('btnGenerateCashflow').style.display = 'inline-flex';
-    updateInterviewTopics();
+    // Actualizar progreso real desde el backend
+    if (data.progress) {
+      updateInterviewProgressFromData(data.progress);
+    }
+
+    // Mostrar sugerencias clickeables
+    if (data.suggestions && data.suggestions.length > 0) {
+      renderSuggestionChips(data.suggestions);
+    }
+
+    // Mostrar botón de generar si hay suficientes datos
+    const btnGen = document.getElementById('btnGenerateCashflow');
+    if (data.has_enough_data || data.is_complete) {
+      btnGen.style.display = 'inline-flex';
+      if (data.is_complete) {
+        btnGen.classList.add('pulse-animation');
+        btnGen.innerHTML = '<i class="fas fa-rocket"></i> \u00a1Generar Cashflow Ahora!';
+      }
+    } else {
+      btnGen.style.display = 'inline-flex';
+      btnGen.style.opacity = '0.6';
+    }
+
+    updateInterviewTopics(data.progress?.topics_covered || []);
   } catch(e) {
     removeTyping(typingId);
-    addChatBubble('system-msg', 'Error comunicando con el servidor. Verifica que Ollama esté activo.');
+    console.error('[CCS] Chat error:', e);
+    addChatBubble('system-msg', 'Error comunicando con el servidor. Verifica que Ollama est\u00e9 activo.');
   }
+}
+
+function sendQuickOption(text) {
+  // Enviar una opci\u00f3n r\u00e1pida como si el usuario la hubiera escrito
+  const input = document.getElementById('chatInput');
+  input.value = text;
+  sendMessage();
+}
+
+function clearSuggestionChips() {
+  const container = document.getElementById('suggestionChips');
+  if (container) container.innerHTML = '';
+}
+
+function renderSuggestionChips(suggestions) {
+  let container = document.getElementById('suggestionChips');
+  if (!container) {
+    // Crear contenedor de chips debajo del chat
+    const chatArea = document.querySelector('.chat-input-area') || document.getElementById('chatInput')?.parentElement;
+    if (chatArea) {
+      container = document.createElement('div');
+      container.id = 'suggestionChips';
+      container.className = 'suggestion-chips';
+      chatArea.parentElement.insertBefore(container, chatArea);
+    } else return;
+  }
+
+  container.innerHTML = '';
+  // Mostrar opciones del primer tema pendiente
+  const firstSuggestion = suggestions[0];
+  if (firstSuggestion && firstSuggestion.options) {
+    const label = document.createElement('div');
+    label.className = 'chips-label';
+    label.textContent = 'Respuestas r\u00e1pidas:';
+    container.appendChild(label);
+
+    const chipsRow = document.createElement('div');
+    chipsRow.className = 'chips-row';
+    firstSuggestion.options.forEach(opt => {
+      const chip = document.createElement('button');
+      chip.className = 'chip-btn';
+      chip.textContent = opt;
+      chip.onclick = () => sendQuickOption(opt);
+      chipsRow.appendChild(chip);
+    });
+    container.appendChild(chipsRow);
+  }
+}
+
+function updateInterviewProgressFromData(progress) {
+  const pctEl = document.getElementById('interviewPct');
+  if (pctEl) {
+    pctEl.textContent = `${Math.round(progress.progress_pct || 0)}%`;
+    pctEl.style.color = progress.is_complete ? 'var(--ccs-verde)' : 'var(--ccs-azul)';
+  }
+  const barEl = document.getElementById('interviewBar');
+  if (barEl) barEl.style.width = `${progress.progress_pct || 0}%`;
 }
 
 function addChatBubble(role, content) {
@@ -451,25 +535,31 @@ function removeTyping(id) {
   if (el) el.remove();
 }
 
-function updateInterviewTopics() {
+function updateInterviewTopics(coveredTopics = []) {
   const topics = [
-    { id: 'business', label: 'Tipo de negocio', icon: 'fa-store' },
-    { id: 'products', label: 'Productos/Servicios', icon: 'fa-box' },
-    { id: 'segments', label: 'Segmentos de clientes', icon: 'fa-users' },
-    { id: 'revenue', label: 'Modelo de ingresos', icon: 'fa-dollar-sign' },
-    { id: 'prices', label: 'Precios y volúmenes', icon: 'fa-tag' },
-    { id: 'growth', label: 'Crecimiento esperado', icon: 'fa-chart-line' },
-    { id: 'seasonality', label: 'Estacionalidad', icon: 'fa-calendar' },
-    { id: 'costs', label: 'Costos y gastos', icon: 'fa-receipt' },
-    { id: 'salaries', label: 'Salarios', icon: 'fa-user-tie' },
-    { id: 'cash', label: 'Caja y financiamiento', icon: 'fa-piggy-bank' },
-    { id: 'risks', label: 'Riesgos principales', icon: 'fa-shield-alt' },
+    { id: 'tipo_negocio', label: 'Tipo de negocio', icon: 'fa-store' },
+    { id: 'productos_servicios', label: 'Productos/Servicios', icon: 'fa-box' },
+    { id: 'segmentos_clientes', label: 'Segmentos de clientes', icon: 'fa-users' },
+    { id: 'modelo_ingresos', label: 'Modelo de ingresos', icon: 'fa-dollar-sign' },
+    { id: 'precios_volumen', label: 'Precios y vol\u00famenes', icon: 'fa-tag' },
+    { id: 'crecimiento', label: 'Crecimiento esperado', icon: 'fa-chart-line' },
+    { id: 'estacionalidad', label: 'Estacionalidad', icon: 'fa-calendar' },
+    { id: 'costos_variables', label: 'Costos variables', icon: 'fa-receipt' },
+    { id: 'costos_fijos', label: 'Costos fijos', icon: 'fa-building' },
+    { id: 'salarios', label: 'Salarios', icon: 'fa-user-tie' },
+    { id: 'caja_inicial', label: 'Caja inicial', icon: 'fa-piggy-bank' },
+    { id: 'deuda', label: 'Deuda', icon: 'fa-credit-card' },
+    { id: 'riesgos', label: 'Riesgos principales', icon: 'fa-shield-alt' },
   ];
 
   const container = document.getElementById('interviewTopics');
-  container.innerHTML = topics.map(t =>
-    `<div class="topic-item"><span class="topic-icon"><i class="fas ${t.icon}"></i></span> ${t.label}</div>`
-  ).join('');
+  if (!container) return;
+  container.innerHTML = topics.map(t => {
+    const covered = coveredTopics.includes(t.id);
+    return `<div class="topic-item ${covered ? 'covered' : ''}">
+      <span class="topic-icon"><i class="fas ${covered ? 'fa-check-circle' : t.icon}" style="${covered ? 'color:var(--ccs-verde)' : ''}"></i></span> ${t.label}
+    </div>`;
+  }).join('');
 }
 
 // ============================================================================
@@ -520,22 +610,24 @@ function pollGenerationProgress(taskId) {
       const r = await fetch(`${API}/api/v2/generation/${taskId}/progress`);
       const data = await r.json();
 
-      const pct = data.progress_pct || 0;
+      // Backend V2 retorna: { status, progress, step, phase, notifications: [{message, timestamp}], error }
+      const pct = data.progress || 0;
       document.getElementById('genBar').style.width = `${pct}%`;
       document.getElementById('genPct').textContent = `${Math.round(pct)}%`;
-      document.getElementById('genStep').textContent = data.current_step || 'Procesando...';
+      document.getElementById('genStep').textContent = data.step || 'Procesando...';
 
-      // Add notifications
+      // Add notifications - cada notificación es {message, timestamp}
       if (data.notifications && data.notifications.length > 0) {
         const container = document.getElementById('genNotifications');
         const existing = container.querySelectorAll('.notification-item').length;
         data.notifications.slice(existing).forEach(n => {
-          container.innerHTML += `<div class="notification-item"><i class="fas fa-info-circle" style="color:var(--ccs-azul);margin-right:6px;"></i>${n}</div>`;
+          const msg = (typeof n === 'string') ? n : (n.message || JSON.stringify(n));
+          container.innerHTML += `<div class="notification-item"><i class="fas fa-info-circle" style="color:var(--ccs-azul);margin-right:6px;"></i>${msg}</div>`;
         });
         container.scrollTop = container.scrollHeight;
       }
 
-      if (data.status === 'completed' || pct >= 100) {
+      if (data.status === 'done' || pct >= 100) {
         clearInterval(poll);
         document.getElementById('genProgressPanel').style.display = 'none';
         loadCashflow();
@@ -543,9 +635,11 @@ function pollGenerationProgress(taskId) {
       } else if (data.status === 'error') {
         clearInterval(poll);
         document.getElementById('genStep').textContent = 'Error: ' + (data.error || 'Error desconocido');
-        notify('error', 'Error en la generación');
+        notify('error', 'Error en la generación: ' + (data.error || ''));
       }
-    } catch(e) {}
+    } catch(e) {
+      console.error('[CCS] Error polling generation progress:', e);
+    }
   }, 2000);
 }
 
@@ -707,35 +801,106 @@ function resetSliders() {
 
 async function applySimulation() {
   if (!state.companyId) return;
-  const params = {
-    sales_change_pct: parseFloat(document.getElementById('sliderSales')?.value || 0),
-    variable_costs_change_pct: parseFloat(document.getElementById('sliderCosts')?.value || 0),
-    fixed_costs_change_pct: parseFloat(document.getElementById('sliderFixed')?.value || 0),
-    inflation_pct: parseFloat(document.getElementById('sliderInfl')?.value || 0),
-    new_clients_pct: parseFloat(document.getElementById('sliderClients')?.value || 0),
+
+  // Leer valores de sliders y convertir % a multiplicador
+  const salesPct = parseFloat(document.getElementById('sliderSales')?.value || 0);
+  const costsPct = parseFloat(document.getElementById('sliderCosts')?.value || 0);
+  const fixedPct = parseFloat(document.getElementById('sliderFixed')?.value || 0);
+  const inflPct = parseFloat(document.getElementById('sliderInfl')?.value || 0);
+  const clientsPct = parseFloat(document.getElementById('sliderClients')?.value || 0);
+
+  // Backend V2 custom-scenario espera: nombre, sales_mult, costs_mult, growth_mult, fixed_costs_mult
+  const v2Body = {
+    nombre: `Simulaci\u00f3n: ventas ${salesPct > 0 ? '+' : ''}${salesPct}%`,
+    sales_mult: 1 + (salesPct / 100),
+    costs_mult: 1 + (costsPct / 100),
+    growth_mult: 1 + (clientsPct / 100),
+    fixed_costs_mult: 1 + (fixedPct / 100),
   };
+
+  showGlobalLoading('Simulando...', 'Calculando escenario personalizado');
 
   try {
     const r = await fetch(`${API}/api/v2/companies/${state.companyId}/custom-scenario`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Simulación manual', multipliers: params })
+      body: JSON.stringify(v2Body)
     });
     const data = await r.json();
-    if (data.months) renderSimulationChart(data.months);
-    notify('success', 'Simulación aplicada');
+    hideGlobalLoading();
+
+    if (data.detail) {
+      // Error del backend
+      console.error('[CCS] Simulation error:', data.detail);
+      notify('error', 'Error: ' + data.detail);
+      return;
+    }
+
+    // V2 retorna: { scenario_id, result: { months, caja_final, ... } }
+    const months = data.result?.months || data.months || [];
+    if (months.length > 0) {
+      renderSimulationChart(months);
+      const cajaFinal = data.result?.caja_final || months[months.length - 1]?.cumulative_balance;
+      document.getElementById('simResult').innerHTML = `
+        <div class="stat-card green">
+          <div class="stat-label">Caja Final Simulada</div>
+          <div class="stat-value">${formatCurrencyShort(cajaFinal || 0)}</div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-label">Escenario</div>
+          <div class="stat-value" style="font-size:14px;">${v2Body.nombre}</div>
+        </div>
+      `;
+      notify('success', 'Simulaci\u00f3n aplicada exitosamente');
+    } else {
+      notify('error', 'No se obtuvieron datos de simulaci\u00f3n');
+    }
   } catch(e) {
+    hideGlobalLoading();
+    console.error('[CCS] Simulation error:', e);
     // Fallback to V1
     try {
+      const v1Params = {
+        instruction: `Simular con ventas ${salesPct}%, costos ${costsPct}%`,
+        params: {
+          sales_change_pct: salesPct,
+          costs_change_pct: costsPct,
+          fixed_costs_change_pct: fixedPct,
+          inflation_annual_pct: inflPct,
+        }
+      };
       const r = await fetch(`${API}/api/companies/${state.companyId}/simulate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
+        body: JSON.stringify(v1Params)
       });
       const data = await r.json();
-      if (data.months) renderSimulationChart(data.months);
-    } catch(e2) { notify('error', 'Error en simulación'); }
+      if (data.task_id) {
+        pollSimulationV1(data.task_id);
+      }
+    } catch(e2) {
+      notify('error', 'Error en simulaci\u00f3n');
+    }
   }
+}
+
+function pollSimulationV1(taskId) {
+  const poll = setInterval(async () => {
+    try {
+      const r = await fetch(`${API}/api/generation/${taskId}/progress`);
+      const data = await r.json();
+      if (data.status === 'completed') {
+        clearInterval(poll);
+        hideGlobalLoading();
+        if (data.scenario_id) {
+          const sr = await fetch(`${API}/api/scenarios/${data.scenario_id}`);
+          const scenario = await sr.json();
+          if (scenario.months) renderSimulationChart(scenario.months);
+        }
+        notify('success', 'Simulaci\u00f3n V1 completada');
+      }
+    } catch(e) {}
+  }, 2000);
 }
 
 function renderSimulationChart(months) {
@@ -768,7 +933,7 @@ function renderSimulationChart(months) {
 // ============================================================================
 async function runMonteCarlo() {
   if (!state.companyId) return;
-  showGlobalLoading('Ejecutando Monte Carlo...', 'Simulando miles de escenarios');
+  showGlobalLoading('Ejecutando Monte Carlo...', 'Simulando miles de escenarios probabilísticos');
 
   try {
     const r = await fetch(`${API}/api/v2/companies/${state.companyId}/monte-carlo`, {
@@ -777,13 +942,60 @@ async function runMonteCarlo() {
       body: JSON.stringify({ iterations: 1000 })
     });
     const data = await r.json();
-    hideGlobalLoading();
-    renderMonteCarloResults(data);
-    notify('success', 'Simulación Monte Carlo completada');
+
+    if (data.task_id) {
+      // Es async — poll para resultados
+      state.mcTaskId = data.task_id;
+      pollMonteCarloProgress(data.task_id);
+    } else if (data.probabilidad_insolvencia_pct !== undefined) {
+      // Respuesta directa
+      hideGlobalLoading();
+      renderMonteCarloResults(data);
+      notify('success', 'Simulación Monte Carlo completada');
+    } else {
+      hideGlobalLoading();
+      notify('error', 'Respuesta inesperada del servidor');
+    }
   } catch(e) {
     hideGlobalLoading();
+    console.error('[CCS] Monte Carlo error:', e);
     notify('error', 'Error ejecutando Monte Carlo');
   }
+}
+
+function pollMonteCarloProgress(taskId) {
+  const poll = setInterval(async () => {
+    try {
+      const r = await fetch(`${API}/api/v2/generation/${taskId}/progress`);
+      const data = await r.json();
+
+      const pct = data.progress || 0;
+      // Update loading text
+      const loadingText = document.querySelector('.loading-text');
+      if (loadingText) loadingText.textContent = data.step || `Monte Carlo: ${pct}%`;
+
+      if (data.status === 'done') {
+        clearInterval(poll);
+        hideGlobalLoading();
+        // El resultado está en data.result
+        if (data.result) {
+          renderMonteCarloResults(data.result);
+        } else {
+          // Cargar desde cashflow guardado
+          const cr = await fetch(`${API}/api/companies/${state.companyId}/cashflow`);
+          const cashflow = await cr.json();
+          if (cashflow.monte_carlo) renderMonteCarloResults(cashflow.monte_carlo);
+        }
+        notify('success', 'Simulación Monte Carlo completada');
+      } else if (data.status === 'error') {
+        clearInterval(poll);
+        hideGlobalLoading();
+        notify('error', 'Error en Monte Carlo: ' + (data.error || ''));
+      }
+    } catch(e) {
+      console.error('[CCS] MC poll error:', e);
+    }
+  }, 2000);
 }
 
 function renderMonteCarloResults(data) {
@@ -1006,4 +1218,167 @@ function formatCurrencyShort(value) {
   if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(1) + 'M';
   if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(0) + 'K';
   return sign + '$' + Math.round(abs).toLocaleString('es-CL');
+}
+
+// ============================================================================
+// Agentes & Skills
+// ============================================================================
+async function loadAgents() {
+  try {
+    const r = await fetch(`${API}/api/agents`);
+    const data = await r.json();
+    const agents = data.agents || [];
+    const grid = document.getElementById('agentsGrid');
+
+    grid.innerHTML = agents.map(agent => `
+      <div class="card" style="padding:16px;" id="agent-card-${agent.id}">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+          <div style="width:36px; height:36px; border-radius:50%; background:var(--ccs-azul); display:flex; align-items:center; justify-content:center;">
+            <i class="fas fa-robot" style="color:#fff; font-size:14px;"></i>
+          </div>
+          <div>
+            <div style="font-weight:700; font-size:13px; color:var(--ccs-azul-oscuro);">${agent.name || agent.id}</div>
+            <div style="font-size:11px; color:var(--text-muted);">${agent.description || 'Agente del sistema'}</div>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label style="font-size:11px;">Modelo</label>
+          <input type="text" value="${agent.model || 'llama3.2:3b'}" id="agent-model-${agent.id}" style="font-size:12px; padding:6px 10px;">
+        </div>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label style="font-size:11px;">Temperatura</label>
+          <input type="range" min="0" max="1" step="0.1" value="${agent.temperature || 0.7}" id="agent-temp-${agent.id}" oninput="document.getElementById('agent-temp-val-${agent.id}').textContent=this.value">
+          <span id="agent-temp-val-${agent.id}" style="font-size:11px; color:var(--text-muted);">${agent.temperature || 0.7}</span>
+        </div>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label style="font-size:11px;">System Prompt (resumen)</label>
+          <textarea id="agent-prompt-${agent.id}" rows="3" style="font-size:11px; padding:6px 10px; resize:vertical;">${(agent.system_prompt || '').substring(0, 500)}</textarea>
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          ${(agent.skills || []).map(s => `<span style="padding:2px 8px; background:#f0f4ff; border-radius:10px; font-size:10px; color:var(--ccs-azul);">${s}</span>`).join('')}
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {
+    console.error('[CCS] Error loading agents:', e);
+    document.getElementById('agentsGrid').innerHTML = '<div class="card"><p style="color:var(--text-muted);">Error cargando agentes</p></div>';
+  }
+}
+
+async function saveAgents() {
+  try {
+    const r = await fetch(`${API}/api/agents`);
+    const data = await r.json();
+    const agents = data.agents || [];
+
+    const updates = agents.map(agent => ({
+      id: agent.id,
+      model: document.getElementById(`agent-model-${agent.id}`)?.value || agent.model,
+      temperature: parseFloat(document.getElementById(`agent-temp-${agent.id}`)?.value || agent.temperature),
+      system_prompt: document.getElementById(`agent-prompt-${agent.id}`)?.value || agent.system_prompt,
+    }));
+
+    const resp = await fetch(`${API}/api/agents`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agents: updates })
+    });
+
+    if (resp.ok) {
+      notify('success', 'Agentes actualizados correctamente');
+    } else {
+      notify('error', 'Error guardando agentes');
+    }
+  } catch(e) {
+    console.error('[CCS] Error saving agents:', e);
+    notify('error', 'Error guardando agentes');
+  }
+}
+
+// ============================================================================
+// Uso de Tokens
+// ============================================================================
+async function loadTokenStats() {
+  try {
+    const r = await fetch(`${API}/api/token-usage`);
+    const data = await r.json();
+
+    const stats = data.stats || { total_tokens: 0, total_requests: 0, by_agent: {} };
+
+    // Stats cards
+    document.getElementById('tokenStats').innerHTML = `
+      <div class="stat-card blue">
+        <div class="stat-label">Total Tokens</div>
+        <div class="stat-value">${(stats.total_tokens || 0).toLocaleString()}</div>
+      </div>
+      <div class="stat-card green">
+        <div class="stat-label">Solicitudes</div>
+        <div class="stat-value">${stats.total_requests || 0}</div>
+      </div>
+      <div class="stat-card celeste">
+        <div class="stat-label">Promedio/Solicitud</div>
+        <div class="stat-value">${stats.total_requests ? Math.round(stats.total_tokens / stats.total_requests).toLocaleString() : 0}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Sesiones Activas</div>
+        <div class="stat-value">${stats.active_sessions || 0}</div>
+      </div>
+    `;
+
+    // Chart by agent
+    const byAgent = stats.by_agent || {};
+    const agentNames = Object.keys(byAgent);
+    const agentTokens = agentNames.map(a => byAgent[a]?.tokens || 0);
+
+    const ctx = document.getElementById('chartTokens');
+    if (state.charts.tokens) state.charts.tokens.destroy();
+    state.charts.tokens = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: agentNames.map(n => n.replace(/_/g, ' ')),
+        datasets: [{
+          label: 'Tokens usados',
+          data: agentTokens,
+          backgroundColor: ['#0D3DA6', '#3A6DDE', '#3DAE2B', '#F59E0B', '#EF4444'],
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, ticks: { callback: v => v.toLocaleString() } } }
+      }
+    });
+
+    // Sessions list
+    const sessions = data.recent_sessions || [];
+    document.getElementById('tokenSessionsList').innerHTML = sessions.length
+      ? sessions.map(s => `
+        <div style="display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--border); font-size:12px;">
+          <span style="font-weight:600; color:var(--ccs-azul-oscuro);">${s.agent || 'unknown'}</span>
+          <span style="color:var(--text-muted);">${s.tokens?.toLocaleString() || 0} tokens</span>
+          <span style="color:var(--text-muted);">${s.timestamp ? new Date(s.timestamp).toLocaleString('es-CL') : ''}</span>
+        </div>
+      `).join('')
+      : '<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px;">No hay sesiones registradas a\u00fan</div>';
+
+  } catch(e) {
+    console.error('[CCS] Error loading token stats:', e);
+    document.getElementById('tokenStats').innerHTML = `
+      <div class="stat-card"><div class="stat-label">Total Tokens</div><div class="stat-value">0</div></div>
+      <div class="stat-card"><div class="stat-label">Solicitudes</div><div class="stat-value">0</div></div>
+      <div class="stat-card"><div class="stat-label">Promedio</div><div class="stat-value">0</div></div>
+      <div class="stat-card"><div class="stat-label">Sesiones</div><div class="stat-value">0</div></div>
+    `;
+  }
+}
+
+async function resetTokenStats() {
+  if (!confirm('\u00bfResetear estad\u00edsticas de tokens?')) return;
+  try {
+    await fetch(`${API}/api/token-usage`, { method: 'DELETE' });
+    notify('success', 'Estad\u00edsticas reseteadas');
+    loadTokenStats();
+  } catch(e) {
+    notify('error', 'Error reseteando estad\u00edsticas');
+  }
 }

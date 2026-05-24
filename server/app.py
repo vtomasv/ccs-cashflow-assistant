@@ -44,6 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, validator
+from interview_manager import InterviewManager
 
 # ---------------------------------------------------------------------------
 # Configuración de rutas (siempre absolutas desde __file__)
@@ -102,8 +103,30 @@ RATE_LIMIT_MAX_REQUESTS = 20
 # ---------------------------------------------------------------------------
 # Logging (sin datos financieros sensibles)
 # ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Logging mejorado para visibilidad en consola Pinokio
+_log_format = "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+_log_level = logging.DEBUG if os.environ.get("CCS_DEBUG") else logging.INFO
+logging.basicConfig(
+    level=_log_level,
+    format=_log_format,
+    datefmt="%H:%M:%S"
+)
 logger = logging.getLogger("cashflow-assistant")
+logger.setLevel(_log_level)
+
+# Reducir ruido de librerías externas
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Banner de inicio visible en Pinokio
+print("="*60)
+print("  CCS CASHFLOW ASSISTANT v2.1")
+print("  Motor Financiero Modular con IA Local")
+print("="*60)
+print(f"  Log level: {logging.getLevelName(_log_level)}")
+print(f"  Data dir: {DATA_DIR}")
+print(f"  Platform: {sys.platform}")
+print("="*60)
 
 # ---------------------------------------------------------------------------
 # Seguridad: Sanitización de IDs y nombres de archivo
@@ -164,6 +187,25 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+# ---------------------------------------------------------------------------
+# Middleware de logging de errores (visible en consola Pinokio)
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def log_errors_middleware(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        if response.status_code >= 400:
+            logger.warning(f"[HTTP {response.status_code}] {request.method} {request.url.path}")
+        return response
+    except Exception as e:
+        logger.error(f"[UNHANDLED ERROR] {request.method} {request.url.path}: {type(e).__name__}: {e}")
+        return JSONResponse(status_code=500, content={"detail": f"Error interno: {type(e).__name__}"})
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"[EXCEPTION] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": f"Error del servidor: {type(exc).__name__}: {str(exc)[:200]}"})
 
 # ---------------------------------------------------------------------------
 # Utilidades de persistencia
@@ -358,7 +400,23 @@ def call_ollama_chat(model: str, messages: list, temperature: float = 0.7, timeo
             _start_pull_background(model)
             raise HTTPException(503, f"Modelo {model} no disponible. Descarga iniciada.")
         resp.raise_for_status()
-        content = resp.json()["message"]["content"]
+        resp_data = resp.json()
+        content = resp_data["message"]["content"]
+        # Track token usage
+        try:
+            total_tokens = resp_data.get("eval_count", 0) + resp_data.get("prompt_eval_count", 0)
+            if total_tokens > 0:
+                agent_hint = "unknown"
+                for m in messages:
+                    if m.get("role") == "system":
+                        if "entrevista" in m["content"].lower() or "financiero" in m["content"].lower():
+                            agent_hint = "financial_interviewer"
+                        elif "cashflow" in m["content"].lower() or "flujo" in m["content"].lower():
+                            agent_hint = "cashflow_analyst"
+                        break
+                track_token_usage(agent_hint, total_tokens)
+        except Exception:
+            pass
         return _fix_encoding(content)
     except http_requests.exceptions.ConnectionError:
         raise HTTPException(503, "No se puede conectar con Ollama.")
@@ -1247,21 +1305,36 @@ async def chat_interview(data: ChatMessage):
 
     company = load_json(company_dir / "company.json")
 
+    # --- Inicializar InterviewManager con datos de la empresa ---
+    im = InterviewManager(company_data=company)
+
+    # Cargar sesiones previas para reconstruir progreso
+    sessions_dir = DATA_DIR / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    for f in sorted(sessions_dir.glob(f"{company_id}_*.json")):
+        prev_session = load_json(f)
+        for msg in prev_session.get("messages", []):
+            if msg.get("role") == "user":
+                im.extract_data_from_response(msg["content"], "")
+
+    # Extraer datos del mensaje actual ANTES de generar el prompt
+    extracted = im.extract_data_from_response(data.message, "")
+
+    # Generar system prompt contextualizado con el progreso real
+    system_prompt = im.generate_system_prompt()
+
     session_id = data.session_id or str(uuid.uuid4())[:8]
     session_id = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)[:64]
-    session_path = DATA_DIR / "sessions" / f"{company_id}_{session_id}.json"
+    session_path = sessions_dir / f"{company_id}_{session_id}.json"
     session = load_json(session_path, {"id": session_id, "company_id": company_id, "type": "interview", "messages": [], "created_at": datetime.now().isoformat()})
 
     agent = get_agent("financial_interviewer")
     if not agent:
         raise HTTPException(500, "Agente entrevistador no configurado")
 
-    system_prompt = get_prompt("financial_interviewer")
-    if agent.get("system_prompt"):
-        system_prompt = agent["system_prompt"]
-
+    # Construir mensajes para el LLM (limitar contexto a últimos 16 mensajes)
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in session.get("messages", []):
+    for msg in session.get("messages", [])[-16:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": data.message})
 
@@ -1280,10 +1353,19 @@ async def chat_interview(data: ChatMessage):
         company["updated_at"] = datetime.now().isoformat()
         save_json(company_dir / "company.json", company)
 
+    # Calcular progreso y sugerencias
+    progress = im.get_interview_progress()
+    suggestions = im.get_suggested_responses()
+
     return {
         "response": response,
         "session_id": session_id,
-        "company_status": company.get("status")
+        "company_status": company.get("status"),
+        "progress": progress,
+        "extracted_data": extracted,
+        "suggestions": suggestions,
+        "has_enough_data": progress.get("has_enough_data", False),
+        "is_complete": progress.get("is_complete", False),
     }
 
 # ---------------------------------------------------------------------------
@@ -2103,6 +2185,64 @@ async def available_models():
         return {"models": [m["name"] for m in r.json().get("models", [])]}
     except Exception:
         return {"models": []}
+
+# ---------------------------------------------------------------------------
+# Endpoints: Token Usage
+# ---------------------------------------------------------------------------
+_token_usage_file = DATA_DIR / "token_usage.json"
+
+def _load_token_usage():
+    if _token_usage_file.exists():
+        return load_json(_token_usage_file)
+    return {"stats": {"total_tokens": 0, "total_requests": 0, "by_agent": {}, "active_sessions": 0}, "recent_sessions": []}
+
+def _save_token_usage(data):
+    save_json(_token_usage_file, data)
+
+def track_token_usage(agent_id: str, tokens: int):
+    """Llamar después de cada llamada a Ollama para trackear tokens."""
+    data = _load_token_usage()
+    data["stats"]["total_tokens"] = data["stats"].get("total_tokens", 0) + tokens
+    data["stats"]["total_requests"] = data["stats"].get("total_requests", 0) + 1
+    if agent_id not in data["stats"].get("by_agent", {}):
+        data["stats"]["by_agent"][agent_id] = {"tokens": 0, "requests": 0}
+    data["stats"]["by_agent"][agent_id]["tokens"] += tokens
+    data["stats"]["by_agent"][agent_id]["requests"] += 1
+    data["recent_sessions"].insert(0, {
+        "agent": agent_id,
+        "tokens": tokens,
+        "timestamp": datetime.now().isoformat()
+    })
+    data["recent_sessions"] = data["recent_sessions"][:100]  # Keep last 100
+    _save_token_usage(data)
+
+@app.get("/api/token-usage")
+async def get_token_usage():
+    return _load_token_usage()
+
+@app.delete("/api/token-usage")
+async def reset_token_usage():
+    _save_token_usage({"stats": {"total_tokens": 0, "total_requests": 0, "by_agent": {}, "active_sessions": 0}, "recent_sessions": []})
+    return {"status": "ok"}
+
+@app.put("/api/agents")
+async def update_agents_bulk(request: Request):
+    body = await request.json()
+    updates = body.get("agents", [])
+    agents_data = get_agents()
+    for update in updates:
+        for i, a in enumerate(agents_data.get("agents", [])):
+            if a["id"] == update.get("id"):
+                if "model" in update:
+                    agents_data["agents"][i]["model"] = update["model"]
+                if "temperature" in update:
+                    agents_data["agents"][i]["temperature"] = update["temperature"]
+                if "system_prompt" in update:
+                    agents_data["agents"][i]["system_prompt"] = update["system_prompt"]
+                agents_data["agents"][i]["updated_at"] = datetime.now().isoformat()
+                break
+    save_json(DATA_DIR / "agents" / "agents.json", agents_data)
+    return {"status": "ok", "agents_updated": len(updates)}
 
 # ---------------------------------------------------------------------------
 # Endpoints: Sesiones

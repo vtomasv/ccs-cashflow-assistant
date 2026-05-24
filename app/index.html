@@ -298,6 +298,31 @@
     .welcome-icon { font-size: 56px; color: var(--ccs-azul-oscuro); margin-bottom: 16px; }
     .welcome-title { font-size: 24px; font-weight: 800; color: var(--ccs-azul-oscuro); margin-bottom: 8px; }
     .welcome-sub { font-size: 14px; color: var(--text-muted); margin-bottom: 24px; line-height: 1.6; }
+
+    /* ===== SUGGESTION CHIPS ===== */
+    .suggestion-chips { padding: 8px 16px; border-top: 1px solid var(--border); background: #f8fafc; }
+    .chips-label { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
+    .chips-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip-btn {
+      padding: 6px 12px; border-radius: 16px; border: 1px solid var(--ccs-azul);
+      background: #fff; color: var(--ccs-azul); font-size: 12px; cursor: pointer;
+      transition: all 0.2s; font-weight: 500;
+    }
+    .chip-btn:hover { background: var(--ccs-azul); color: #fff; transform: translateY(-1px); }
+
+    /* ===== TOPIC ITEM COVERED ===== */
+    .topic-item.covered { opacity: 0.7; text-decoration: line-through; }
+    .topic-item.covered .topic-icon i { color: var(--ccs-verde) !important; }
+
+    /* ===== PULSE ANIMATION ===== */
+    @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+    .pulse-animation { animation: pulse 1.5s infinite; }
+
+    /* ===== NOTIFICATION ITEM ===== */
+    .notification-item { padding: 6px 10px; font-size: 12px; color: var(--text-body); border-left: 3px solid var(--ccs-azul); margin-bottom: 4px; background: #f0f4ff; border-radius: 0 4px 4px 0; }
+
+    /* ===== SIM RESULT ===== */
+    #simResult { display: flex; gap: 12px; margin-top: 16px; }
   </style>
 </head>
 <body>
@@ -363,6 +388,12 @@
 
     <div class="sidebar-section">
       <div class="sidebar-section-label">Sistema</div>
+      <div class="nav-item" onclick="navigateTo('agents')" id="nav-agents">
+        <span class="nav-icon"><i class="fas fa-robot"></i></span> <span>Agentes & Skills</span>
+      </div>
+      <div class="nav-item" onclick="navigateTo('tokens')" id="nav-tokens">
+        <span class="nav-icon"><i class="fas fa-chart-bar"></i></span> <span>Uso de Tokens</span>
+      </div>
       <div class="nav-item" onclick="navigateTo('settings')" id="nav-settings">
         <span class="nav-icon"><i class="fas fa-cog"></i></span> <span>Configuración</span>
       </div>
@@ -460,6 +491,7 @@
               <div class="chat-messages" id="chatMessages">
                 <div class="chat-message system-msg">Selecciona o crea una empresa para comenzar la entrevista financiera.</div>
               </div>
+              <div id="suggestionChips" class="suggestion-chips"></div>
               <div class="chat-input-area">
                 <textarea class="chat-input" id="chatInput" placeholder="Escribe tu respuesta..." onkeydown="handleChatKey(event)" disabled></textarea>
                 <button class="btn btn-primary" id="btnSendChat" onclick="sendMessage()" disabled>
@@ -577,6 +609,32 @@
     <!-- ===== PAGE: METRICS ===== -->
     <div class="page" id="page-metrics">
       <div id="metricsContent"></div>
+    </div>
+
+    <!-- ===== PAGE: AGENTS ===== -->
+    <div class="page" id="page-agents">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h2 style="font-size:18px; font-weight:700; color:var(--ccs-azul-oscuro);"><i class="fas fa-robot" style="color:var(--ccs-azul);"></i> Agentes & Skills</h2>
+        <button class="btn btn-primary btn-sm" onclick="saveAgents()"><i class="fas fa-save"></i> Guardar Cambios</button>
+      </div>
+      <div id="agentsGrid" class="grid-2" style="gap:16px;"></div>
+    </div>
+
+    <!-- ===== PAGE: TOKENS ===== -->
+    <div class="page" id="page-tokens">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h2 style="font-size:18px; font-weight:700; color:var(--ccs-azul-oscuro);"><i class="fas fa-chart-bar" style="color:var(--ccs-azul);"></i> Uso de Tokens</h2>
+        <button class="btn btn-sm" onclick="resetTokenStats()" style="border:1px solid var(--border);"><i class="fas fa-redo"></i> Resetear</button>
+      </div>
+      <div class="grid-4" id="tokenStats" style="margin-bottom:20px;"></div>
+      <div class="card">
+        <div class="card-title">Historial de Uso por Agente</div>
+        <canvas id="chartTokens" height="200"></canvas>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-title">Detalle de Sesiones</div>
+        <div id="tokenSessionsList" style="max-height:300px; overflow-y:auto;"></div>
+      </div>
     </div>
 
     <!-- ===== PAGE: SETTINGS ===== -->

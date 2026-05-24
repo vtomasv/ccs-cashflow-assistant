@@ -248,8 +248,12 @@ class CashflowModel:
         # Deuda
         debt_payments = self.profile.debt_monthly_payment
 
-        # CAPEX planificado
-        investments = self.profile.capex_planned.get(month_index + 1, 0.0)
+        # CAPEX planificado (puede ser dict {mes: monto} o un valor fijo mensual)
+        cp = self.profile.capex_planned
+        if isinstance(cp, dict):
+            investments = cp.get(month_index + 1, 0.0)
+        else:
+            investments = float(cp) if cp else 0.0
 
         expenses = ExpenseData(
             variable_costs=variable_costs,
