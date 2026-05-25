@@ -35,6 +35,23 @@ from interview_manager import InterviewManager, INTERVIEW_TOPICS
 from market_research import search_market_data, get_market_seasonality_factors, get_inflation_rate
 
 # ---------------------------------------------------------------------------
+# Utilidad para sanitizar inf/nan antes de serializar a JSON
+# ---------------------------------------------------------------------------
+import math as _math
+
+def _sanitize_for_json(d):
+    """Recursivamente reemplaza inf/nan con 0.0 para ser JSON-compatible."""
+    if isinstance(d, dict):
+        return {k: _sanitize_for_json(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [_sanitize_for_json(item) for item in d]
+    elif isinstance(d, float):
+        if _math.isinf(d) or _math.isnan(d):
+            return 0.0
+        return d
+    return d
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 router = APIRouter(prefix="/api/v2", tags=["advanced"])
@@ -454,14 +471,14 @@ async def get_financial_metrics(company_id: str):
 
     # Si ya tiene métricas calculadas (v2), retornarlas
     if "metrics" in cashflow_data and cashflow_data.get("version") == "v2":
-        return cashflow_data["metrics"]
+        return _sanitize_for_json(cashflow_data["metrics"])
 
     # Si es un cashflow legacy, recalcular
     try:
         model = CashflowModel.from_dict(cashflow_data)
         calculator = FinancialMetrics(model)
         metrics = calculator.calculate_all()
-        return metrics
+        return _sanitize_for_json(metrics)
     except Exception as e:
         raise HTTPException(500, f"Error calculando métricas: {str(e)}")
 

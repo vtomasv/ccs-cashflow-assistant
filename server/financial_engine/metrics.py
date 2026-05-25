@@ -50,15 +50,18 @@ class FinancialMetrics:
         if not self.months:
             return {"valor": 0, "mes": "", "indice": 0}
 
-        min_balance = float("inf")
+        min_balance = None
         min_month = ""
         min_index = 0
 
         for i, m in enumerate(self.months):
-            if m.cumulative_balance < min_balance:
+            if min_balance is None or m.cumulative_balance < min_balance:
                 min_balance = m.cumulative_balance
                 min_month = m.label
                 min_index = i
+
+        if min_balance is None:
+            min_balance = 0.0
 
         return {
             "valor": round(min_balance, 2),
@@ -100,7 +103,7 @@ class FinancialMetrics:
 
         if margen_contribucion <= 0:
             return {
-                "ventas_mensuales_necesarias": float("inf"),
+                "ventas_mensuales_necesarias": 999999999,
                 "margen_contribucion_pct": round(margen_contribucion * 100, 1),
                 "alcanzado": False,
                 "mensaje": "El margen de contribución es negativo: cada venta genera pérdida."
@@ -134,7 +137,7 @@ class FinancialMetrics:
 
         if avg_net_flow >= 0:
             return {
-                "meses": float("inf"),
+                "meses": 999,
                 "es_rentable": True,
                 "mensaje": "La empresa es rentable en promedio: no necesita runway.",
                 "caja_inicial": round(initial_cash, 2),

@@ -212,7 +212,27 @@ async def global_exception_handler(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 def save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        text = json.dumps(data, indent=2, ensure_ascii=False)
+    except (ValueError, OverflowError):
+        # Sanitizar inf/nan si la serialización falla
+        data = _sanitize_dict_safe(data)
+        text = json.dumps(data, indent=2, ensure_ascii=False)
+    path.write_text(text, encoding="utf-8")
+
+
+def _sanitize_dict_safe(d):
+    """Versión segura de sanitización para usar antes de que _sanitize_dict esté definida."""
+    import math
+    if isinstance(d, dict):
+        return {k: _sanitize_dict_safe(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [_sanitize_dict_safe(item) for item in d]
+    elif isinstance(d, float):
+        if math.isinf(d) or math.isnan(d):
+            return 0.0
+        return d
+    return d
 
 def load_json(path: Path, default=None):
     if path.exists():
@@ -612,12 +632,41 @@ class MonthData(BaseModel):
 # ---------------------------------------------------------------------------
 # Normalización de datos de flujo de caja
 # ---------------------------------------------------------------------------
+import math as _math
+
+def _sanitize_float(val) -> float:
+    """Sanitiza un float para que sea JSON-compatible (sin inf/nan)."""
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        if _math.isinf(val) or _math.isnan(val):
+            return 0.0
+        return float(val)
+    return 0.0
+
+
+def _sanitize_dict(d):
+    """Recursivamente sanitiza todos los floats en un dict/list para ser JSON-compatible."""
+    if isinstance(d, dict):
+        return {k: _sanitize_dict(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [_sanitize_dict(item) for item in d]
+    elif isinstance(d, float):
+        if _math.isinf(d) or _math.isnan(d):
+            return 0.0
+        return d
+    return d
+
+
 def _to_num(val) -> float:
     """Convierte un valor a número de forma robusta."""
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
-        return float(val)
+        f = float(val)
+        if _math.isinf(f) or _math.isnan(f):
+            return 0.0
+        return f
     if isinstance(val, str):
         clean = val.strip().replace("$", "").replace(" ", "")
         if clean.count(".") > 1:
@@ -1453,6 +1502,18 @@ async def chat_interview(data: ChatMessage):
     progress = im.get_interview_progress()
     suggestions = im.get_suggested_responses(assistant_response=response)
 
+    # --- Detectar si el usuario acepta generar el cashflow ---
+    trigger_generation = False
+    msg_lower = data.message.lower().strip()
+    acceptance_phrases = [
+        "sí", "si", "dale", "genera", "generar", "hazlo", "ok", "listo",
+        "sí, genera", "si, genera", "genera el cashflow", "vamos",
+        "perfecto", "adelante", "procede", "sí por favor",
+    ]
+    if progress.get("is_complete", False) or progress.get("has_enough_data", False):
+        if any(phrase in msg_lower for phrase in acceptance_phrases):
+            trigger_generation = True
+
     return {
         "response": response,
         "session_id": session_id,
@@ -1462,6 +1523,7 @@ async def chat_interview(data: ChatMessage):
         "suggestions": suggestions,
         "has_enough_data": progress.get("has_enough_data", False),
         "is_complete": progress.get("is_complete", False),
+        "trigger_generation": trigger_generation,
     }
 
 # ---------------------------------------------------------------------------
@@ -1590,6 +1652,8 @@ async def get_cashflow(company_id: str):
         raise HTTPException(404, "Flujo de caja no encontrado. Genera uno primero.")
     data = load_json(path)
     data = normalize_cashflow(data)
+    # Sanitizar inf/nan antes de serializar a JSON
+    data = _sanitize_dict(data)
     return data
 
 # ---------------------------------------------------------------------------

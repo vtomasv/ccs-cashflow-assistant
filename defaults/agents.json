@@ -3,8 +3,8 @@
   "agents": [
     {
       "id": "financial_interviewer",
-      "name": "Entrevistador Financiero v2",
-      "description": "Conduce entrevistas inteligentes con máximo 8 preguntas por turno, contextualizadas al negocio. Cubre 22 áreas financieras priorizadas por impacto en cashflow.",
+      "name": "Entrevistador Financiero v3",
+      "description": "Conduce entrevistas inteligentes con exactamente UNA pregunta por turno, contextualizadas al negocio. Confirma n\u00fameros en cada interacci\u00f3n y mantiene memoria completa de datos recopilados. Cubre 22 \u00e1reas financieras priorizadas por impacto en cashflow.",
       "role": "interviewer",
       "model": "llama3.2:3b",
       "temperature": 0.7,

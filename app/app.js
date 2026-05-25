@@ -430,6 +430,7 @@ async function sendMessage() {
     const btnGen = document.getElementById('btnGenerateCashflow');
     if (data.has_enough_data || data.is_complete) {
       btnGen.style.display = 'inline-flex';
+      btnGen.style.opacity = '1';
       if (data.is_complete) {
         btnGen.classList.add('pulse-animation');
         btnGen.innerHTML = '<i class="fas fa-rocket"></i> \u00a1Generar Cashflow Ahora!';
@@ -437,6 +438,14 @@ async function sendMessage() {
     } else {
       btnGen.style.display = 'inline-flex';
       btnGen.style.opacity = '0.6';
+    }
+
+    // Auto-gatillar generación si el usuario aceptó
+    if (data.trigger_generation) {
+      setTimeout(function() {
+        addChatBubble('system-msg', '\u2728 Iniciando generaci\u00f3n del flujo de caja...');
+        generateCashflow();
+      }, 1500);
     }
 
     updateInterviewTopics(data.progress?.topics_covered || []);
