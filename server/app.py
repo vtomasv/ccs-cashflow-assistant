@@ -38,8 +38,10 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
+import hashlib
+import base64
 import requests as http_requests
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -1385,6 +1387,32 @@ async def create_company(data: CompanyCreate):
     logger.info(f"Empresa creada: {company_id}")
     return company
 
+def _reconcile_company_status(company: dict, company_dir: Path) -> dict:
+    """Reconcilia el estado de la empresa basándose en archivos reales en disco.
+    Si existe cashflow.json, la empresa está completa aunque company.json diga 'pending'.
+    Si existe interview_state.json con datos, la empresa está en entrevista.
+    """
+    current_status = company.get("status", "pending")
+    # Si ya tiene cashflow generado, marcar como complete
+    cashflow_path = company_dir / "cashflow.json"
+    if cashflow_path.exists():
+        cashflow_data = load_json(cashflow_path, {})
+        if cashflow_data.get("months") or cashflow_data.get("summary"):
+            if current_status != "complete":
+                company["status"] = "complete"
+                save_json(company_dir / "company.json", company)
+            return company
+    # Si tiene interview_state con datos, marcar como interviewing
+    interview_state_path = company_dir / "interview_state.json"
+    if interview_state_path.exists():
+        state = load_json(interview_state_path, {})
+        if state.get("collected_data") and len(state["collected_data"]) > 0:
+            if current_status == "pending":
+                company["status"] = "interviewing"
+                save_json(company_dir / "company.json", company)
+    return company
+
+
 @app.get("/api/companies")
 async def list_companies():
     companies_dir = DATA_DIR / "companies"
@@ -1394,6 +1422,7 @@ async def list_companies():
         if d.is_dir():
             company = load_json(d / "company.json")
             if company:
+                company = _reconcile_company_status(company, d)
                 companies.append(company)
     return {"companies": companies}
 
@@ -1403,7 +1432,35 @@ async def get_company(company_id: str):
     company_dir = DATA_DIR / "companies" / company_id
     if not company_dir.exists():
         raise HTTPException(404, "Empresa no encontrada")
-    return load_json(company_dir / "company.json")
+    company = load_json(company_dir / "company.json")
+    # Reconciliar estado basándose en archivos reales
+    company = _reconcile_company_status(company, company_dir)
+    return company
+
+
+@app.get("/api/companies/{company_id}/interview-progress")
+async def get_interview_progress(company_id: str):
+    """Retorna el estado persistido de la entrevista para restaurar la UI."""
+    company_id = _sanitize_id(company_id)
+    company_dir = DATA_DIR / "companies" / company_id
+    if not company_dir.exists():
+        raise HTTPException(404, "Empresa no encontrada")
+    interview_state_path = company_dir / "interview_state.json"
+    persisted_state = load_json(interview_state_path, {"collected_data": {}, "topics_covered": []})
+    company = load_json(company_dir / "company.json")
+    # Recalcular progreso usando InterviewManager
+    im = InterviewManager(
+        company_data=company,
+        persisted_data=persisted_state.get("collected_data", {}),
+        persisted_topics=persisted_state.get("topics_covered", [])
+    )
+    progress = im.get_interview_progress()
+    return {
+        "progress": progress,
+        "topics_covered": persisted_state.get("topics_covered", []),
+        "collected_data_keys": list(persisted_state.get("collected_data", {}).keys()),
+        "last_updated": persisted_state.get("last_updated"),
+    }
 
 @app.delete("/api/companies/{company_id}")
 async def delete_company(company_id: str):
@@ -1498,9 +1555,8 @@ async def chat_interview(data: ChatMessage):
     }
     save_json(interview_state_path, new_state)
 
-    # Calcular progreso y sugerencias dinámicas basadas en la respuesta
+    # Calcular progreso basado en datos recopilados
     progress = im.get_interview_progress()
-    suggestions = im.get_suggested_responses(assistant_response=response)
 
     # --- Detectar si el usuario acepta generar el cashflow ---
     trigger_generation = False
@@ -1520,7 +1576,6 @@ async def chat_interview(data: ChatMessage):
         "company_status": company.get("status"),
         "progress": progress,
         "extracted_data": extracted,
-        "suggestions": suggestions,
         "has_enough_data": progress.get("has_enough_data", False),
         "is_complete": progress.get("is_complete", False),
         "trigger_generation": trigger_generation,
@@ -2556,6 +2611,233 @@ async def startup():
 async def root():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/ui/index.html")
+
+# ---------------------------------------------------------------------------
+# Endpoints: Exportar / Importar datos globales
+# ---------------------------------------------------------------------------
+def _compute_data_hash(data_bytes: bytes) -> str:
+    """Calcula SHA-256 del contenido para verificación de integridad."""
+    return hashlib.sha256(data_bytes).hexdigest()
+
+
+def _collect_export_data() -> dict:
+    """Recolecta todos los datos del sistema para exportar."""
+    export_data = {
+        "export_version": "1.0",
+        "exported_at": datetime.now().isoformat(),
+        "plugin_name": "ccs-cashflow-assistant",
+        "config": None,
+        "agents": None,
+        "companies": [],
+        "prompts": {},
+        "skills": {},
+    }
+    # Config
+    config_file = DATA_DIR / "config.json"
+    if config_file.exists():
+        export_data["config"] = load_json(config_file)
+    # Agentes
+    agents_file = DATA_DIR / "agents" / "agents.json"
+    if agents_file.exists():
+        export_data["agents"] = load_json(agents_file)
+    # Prompts del sistema
+    prompts_dir = DATA_DIR / "prompts" / "system"
+    if prompts_dir.exists():
+        for f in prompts_dir.glob("*.md"):
+            export_data["prompts"][f.stem] = f.read_text(encoding="utf-8")
+    # Skills
+    skills_dir = DATA_DIR / "prompts" / "skills"
+    if skills_dir.exists():
+        for f in skills_dir.glob("*.md"):
+            export_data["skills"][f.stem] = f.read_text(encoding="utf-8")
+    # Empresas con todo su contenido
+    companies_dir = DATA_DIR / "companies"
+    if companies_dir.exists():
+        for company_dir in sorted(companies_dir.iterdir()):
+            if company_dir.is_dir():
+                company_export = {"id": company_dir.name, "files": {}}
+                for json_file in company_dir.glob("*.json"):
+                    company_export["files"][json_file.name] = load_json(json_file)
+                export_data["companies"].append(company_export)
+    # Sesiones
+    sessions_dir = DATA_DIR / "sessions"
+    if sessions_dir.exists():
+        export_data["sessions"] = {}
+        for f in sessions_dir.glob("*.json"):
+            export_data["sessions"][f.name] = load_json(f)
+    # Escenarios
+    scenarios_dir = DATA_DIR / "scenarios"
+    if scenarios_dir.exists():
+        export_data["scenarios"] = {}
+        for f in scenarios_dir.glob("*.json"):
+            export_data["scenarios"][f.name] = load_json(f)
+    return export_data
+
+
+@app.get("/api/export")
+async def export_all_data():
+    """Exporta todos los datos del sistema en un archivo JSON firmado con hash SHA-256."""
+    try:
+        export_data = _collect_export_data()
+        data_json = json.dumps(export_data, ensure_ascii=False, sort_keys=True, default=str)
+        data_bytes = data_json.encode("utf-8")
+        integrity_hash = _compute_data_hash(data_bytes)
+        export_package = {
+            "integrity_hash": integrity_hash,
+            "hash_algorithm": "sha256",
+            "data": export_data,
+        }
+        export_filename = f"ccs_cashflow_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        exports_dir = DATA_DIR / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        export_file = exports_dir / export_filename
+        save_json(export_file, export_package)
+        logger.info(f"Exportaci\u00f3n completada: {export_filename}")
+        return FileResponse(
+            path=str(export_file),
+            filename=export_filename,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{export_filename}"'},
+        )
+    except Exception as e:
+        logger.error(f"Error en exportaci\u00f3n: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al exportar datos: {str(e)}")
+
+
+@app.post("/api/import")
+async def import_all_data(file: UploadFile = File(...)):
+    """Importa datos desde un archivo de exportaci\u00f3n, verificando integridad por hash."""
+    try:
+        content = await file.read()
+        try:
+            package = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise HTTPException(status_code=400, detail=f"El archivo no es un JSON v\u00e1lido: {str(e)}")
+        if "integrity_hash" not in package or "data" not in package:
+            raise HTTPException(status_code=400, detail="Archivo inv\u00e1lido. No tiene la estructura de exportaci\u00f3n esperada.")
+        stored_hash = package["integrity_hash"]
+        export_data = package["data"]
+        data_json = json.dumps(export_data, ensure_ascii=False, sort_keys=True, default=str)
+        data_bytes = data_json.encode("utf-8")
+        computed_hash = _compute_data_hash(data_bytes)
+        if computed_hash != stored_hash:
+            raise HTTPException(status_code=400, detail="Verificaci\u00f3n de integridad fallida. El archivo fue modificado.")
+        if export_data.get("export_version", "unknown") != "1.0":
+            raise HTTPException(status_code=400, detail=f"Versi\u00f3n no soportada: {export_data.get('export_version')}")
+        imported_stats = {"companies": 0, "prompts": 0, "skills": 0, "sessions": 0, "skipped_existing": 0}
+        # 1. Config (merge)
+        if export_data.get("config"):
+            config_file = DATA_DIR / "config.json"
+            existing = load_json(config_file, {})
+            for key, value in export_data["config"].items():
+                if key not in existing:
+                    existing[key] = value
+            save_json(config_file, existing)
+        # 2. Agentes
+        if export_data.get("agents"):
+            agents_file = DATA_DIR / "agents" / "agents.json"
+            (DATA_DIR / "agents").mkdir(parents=True, exist_ok=True)
+            existing_agents = load_json(agents_file, {"agents": []})
+            imported_agents = export_data["agents"]
+            if isinstance(imported_agents, dict) and "agents" in imported_agents:
+                existing_ids = [a.get("id") for a in existing_agents.get("agents", [])]
+                for agent in imported_agents["agents"]:
+                    if agent.get("id") and agent["id"] not in existing_ids:
+                        existing_agents.setdefault("agents", []).append(agent)
+            save_json(agents_file, existing_agents)
+        # 3. Prompts
+        if export_data.get("prompts"):
+            prompts_dir = DATA_DIR / "prompts" / "system"
+            prompts_dir.mkdir(parents=True, exist_ok=True)
+            for name, content_text in export_data["prompts"].items():
+                prompt_file = prompts_dir / f"{name}.md"
+                if not prompt_file.exists():
+                    prompt_file.write_text(content_text, encoding="utf-8")
+                    imported_stats["prompts"] += 1
+                else:
+                    imported_stats["skipped_existing"] += 1
+        # 4. Skills
+        if export_data.get("skills"):
+            skills_dir = DATA_DIR / "prompts" / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            for name, content_text in export_data["skills"].items():
+                skill_file = skills_dir / f"{name}.md"
+                if not skill_file.exists():
+                    skill_file.write_text(content_text, encoding="utf-8")
+                    imported_stats["skills"] += 1
+                else:
+                    imported_stats["skipped_existing"] += 1
+        # 5. Empresas
+        if export_data.get("companies"):
+            companies_dir = DATA_DIR / "companies"
+            companies_dir.mkdir(parents=True, exist_ok=True)
+            for company_export in export_data["companies"]:
+                company_id = company_export.get("id")
+                if not company_id:
+                    continue
+                company_dir = companies_dir / company_id
+                if company_dir.exists():
+                    imported_stats["skipped_existing"] += 1
+                    continue
+                company_dir.mkdir(parents=True, exist_ok=True)
+                for filename, file_data in company_export.get("files", {}).items():
+                    if file_data:
+                        save_json(company_dir / filename, file_data)
+                imported_stats["companies"] += 1
+        # 6. Sesiones
+        if export_data.get("sessions"):
+            sessions_dir = DATA_DIR / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            for s_name, s_data in export_data["sessions"].items():
+                session_file = sessions_dir / s_name
+                if not session_file.exists() and s_data:
+                    save_json(session_file, s_data)
+                    imported_stats["sessions"] += 1
+                else:
+                    imported_stats["skipped_existing"] += 1
+        # 7. Escenarios
+        if export_data.get("scenarios"):
+            scenarios_dir = DATA_DIR / "scenarios"
+            scenarios_dir.mkdir(parents=True, exist_ok=True)
+            for s_name, s_data in export_data["scenarios"].items():
+                scenario_file = scenarios_dir / s_name
+                if not scenario_file.exists() and s_data:
+                    save_json(scenario_file, s_data)
+        logger.info(f"Importaci\u00f3n completada: {imported_stats}")
+        return {"status": "success", "message": "Importaci\u00f3n completada exitosamente.", "stats": imported_stats}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en importaci\u00f3n: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al importar datos: {str(e)}")
+
+
+@app.get("/api/export/info")
+async def export_info():
+    """Retorna informaci\u00f3n sobre qu\u00e9 se exportar\u00eda."""
+    try:
+        companies_dir = DATA_DIR / "companies"
+        company_count = sum(1 for d in companies_dir.iterdir() if d.is_dir()) if companies_dir.exists() else 0
+        sessions_dir = DATA_DIR / "sessions"
+        session_count = len(list(sessions_dir.glob("*.json"))) if sessions_dir.exists() else 0
+        prompts_dir = DATA_DIR / "prompts" / "system"
+        prompt_count = len(list(prompts_dir.glob("*.md"))) if prompts_dir.exists() else 0
+        skills_dir = DATA_DIR / "prompts" / "skills"
+        skill_count = len(list(skills_dir.glob("*.md"))) if skills_dir.exists() else 0
+        scenarios_dir = DATA_DIR / "scenarios"
+        scenario_count = len(list(scenarios_dir.glob("*.json"))) if scenarios_dir.exists() else 0
+        return {
+            "companies": company_count,
+            "sessions": session_count,
+            "scenarios": scenario_count,
+            "prompts": prompt_count,
+            "skills": skill_count,
+            "has_config": (DATA_DIR / "config.json").exists(),
+            "has_agents": (DATA_DIR / "agents" / "agents.json").exists(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

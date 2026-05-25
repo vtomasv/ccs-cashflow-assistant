@@ -233,7 +233,8 @@ async function selectCompany(id) {
       await loadCashflow();
     }
 
-    updateInterviewTopics();
+    // Restaurar progreso de entrevista persistido
+    await restoreInterviewProgress(id);
     renderCompaniesGrid();
     hideGlobalLoading();
 
@@ -399,8 +400,6 @@ async function sendMessage() {
   input.value = '';
   input.style.height = 'auto';
   addChatBubble('user', msg);
-  clearSuggestionChips();
-
   // Show typing indicator
   const typingId = showTyping();
 
@@ -419,11 +418,6 @@ async function sendMessage() {
     // Actualizar progreso real desde el backend
     if (data.progress) {
       updateInterviewProgressFromData(data.progress);
-    }
-
-    // Mostrar sugerencias clickeables
-    if (data.suggestions && data.suggestions.length > 0) {
-      renderSuggestionChips(data.suggestions);
     }
 
     // Mostrar botón de generar si hay suficientes datos
@@ -456,50 +450,18 @@ async function sendMessage() {
   }
 }
 
-function sendQuickOption(text) {
-  // Enviar una opci\u00f3n r\u00e1pida como si el usuario la hubiera escrito
-  const input = document.getElementById('chatInput');
-  input.value = text;
-  sendMessage();
-}
-
-function clearSuggestionChips() {
-  const container = document.getElementById('suggestionChips');
-  if (container) container.innerHTML = '';
-}
-
-function renderSuggestionChips(suggestions) {
-  let container = document.getElementById('suggestionChips');
-  if (!container) {
-    // Crear contenedor de chips debajo del chat
-    const chatArea = document.querySelector('.chat-input-area') || document.getElementById('chatInput')?.parentElement;
-    if (chatArea) {
-      container = document.createElement('div');
-      container.id = 'suggestionChips';
-      container.className = 'suggestion-chips';
-      chatArea.parentElement.insertBefore(container, chatArea);
-    } else return;
-  }
-
-  container.innerHTML = '';
-  // Mostrar opciones del primer tema pendiente
-  const firstSuggestion = suggestions[0];
-  if (firstSuggestion && firstSuggestion.options) {
-    const label = document.createElement('div');
-    label.className = 'chips-label';
-    label.textContent = 'Respuestas r\u00e1pidas:';
-    container.appendChild(label);
-
-    const chipsRow = document.createElement('div');
-    chipsRow.className = 'chips-row';
-    firstSuggestion.options.forEach(opt => {
-      const chip = document.createElement('button');
-      chip.className = 'chip-btn';
-      chip.textContent = opt;
-      chip.onclick = () => sendQuickOption(opt);
-      chipsRow.appendChild(chip);
-    });
-    container.appendChild(chipsRow);
+async function restoreInterviewProgress(companyId) {
+  try {
+    const r = await fetch(`${API}/api/companies/${companyId}/interview-progress`);
+    if (!r.ok) { updateInterviewTopics([]); return; }
+    const data = await r.json();
+    if (data.progress) {
+      updateInterviewProgressFromData(data.progress);
+    }
+    updateInterviewTopics(data.topics_covered || []);
+  } catch(e) {
+    console.error('[CCS] Error restoring interview progress:', e);
+    updateInterviewTopics([]);
   }
 }
 
@@ -1257,10 +1219,187 @@ async function loadSettings() {
           `).join('')}
         </div>
       </div>
+
+      <!-- Secci\u00f3n Exportar / Importar -->
+      <div style="margin-top:24px; display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px;">
+        <!-- Exportar -->
+        <div class="card" style="padding:20px;">
+          <h4 style="margin:0 0 8px; font-size:14px; color:var(--ccs-azul-oscuro);"><i class="fas fa-file-export"></i> Exportar datos</h4>
+          <p style="margin:0 0 16px; font-size:12px; color:var(--text-muted);">Descarga un archivo con todas tus empresas, entrevistas, cashflows, simulaciones, agentes y configuraci\u00f3n. El archivo incluye un hash SHA-256 que impide su modificaci\u00f3n.</p>
+          <div id="exportInfo" style="margin-bottom:12px; padding:10px; background:rgba(13,61,166,0.04); border-radius:8px; border:1px solid var(--border); font-size:12px;"></div>
+          <button class="btn btn-sm" style="background:var(--ccs-azul); color:#fff; font-size:12px; padding:10px 16px;" onclick="exportAllData()" id="btnExportAll">
+            <i class="fas fa-download"></i> Descargar archivo de exportaci\u00f3n
+          </button>
+        </div>
+
+        <!-- Importar -->
+        <div class="card" style="padding:20px;">
+          <h4 style="margin:0 0 8px; font-size:14px; color:var(--ccs-azul-oscuro);"><i class="fas fa-file-import"></i> Importar datos</h4>
+          <p style="margin:0 0 16px; font-size:12px; color:var(--text-muted);">Sube un archivo de exportaci\u00f3n generado en otra m\u00e1quina. Se verificar\u00e1 la integridad del archivo antes de importar. Los datos existentes no se sobreescriben.</p>
+          <div id="importDropZone" style="border:2px dashed var(--border); border-radius:12px; padding:24px; text-align:center; cursor:pointer; transition:all 0.2s;" onclick="document.getElementById('importFileInput').click()">
+            <div style="font-size:28px; margin-bottom:6px;"><i class="fas fa-cloud-upload-alt" style="color:var(--ccs-azul);"></i></div>
+            <div style="font-size:13px; font-weight:500; color:var(--text-primary);">Arrastra el archivo aqu\u00ed o haz click para seleccionar</div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Solo archivos .json generados por la exportaci\u00f3n</div>
+          </div>
+          <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="handleImportFileSelect(this)" />
+          <div id="importStatus" style="display:none; margin-top:12px; padding:10px; border-radius:8px; font-size:12px;"></div>
+          <button class="btn btn-sm" style="background:var(--ccs-verde); color:#fff; font-size:12px; padding:10px 16px; margin-top:12px; display:none;" onclick="executeImportData()" id="btnImportAll">
+            <i class="fas fa-upload"></i> Importar datos verificados
+          </button>
+        </div>
+      </div>
     `;
+
+    // Cargar info de exportaci\u00f3n
+    loadExportInfo();
   } catch(e) {
     console.error('[CCS] Error loading settings:', e);
     document.getElementById('settingsContent').innerHTML = '<p style="color:var(--text-muted);">Error cargando configuraci\u00f3n: ' + e.message + '</p>';
+  }
+}
+
+async function loadExportInfo() {
+  try {
+    const r = await fetch(`${API}/api/export/info`);
+    const info = await r.json();
+    const el = document.getElementById('exportInfo');
+    if (el) {
+      el.innerHTML = `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(80px,1fr)); gap:6px;">
+        <div><strong>${info.companies || 0}</strong> empresas</div>
+        <div><strong>${info.sessions || 0}</strong> sesiones</div>
+        <div><strong>${info.scenarios || 0}</strong> escenarios</div>
+        <div><strong>${info.prompts || 0}</strong> prompts</div>
+        <div><strong>${info.skills || 0}</strong> skills</div>
+      </div>`;
+    }
+  } catch(e) {
+    const el = document.getElementById('exportInfo');
+    if (el) el.innerHTML = '<span style="color:var(--text-muted);">No se pudo cargar info</span>';
+  }
+}
+
+var _importFileData = null;
+
+async function exportAllData() {
+  const btn = document.getElementById('btnExportAll');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generando...'; }
+  try {
+    const r = await fetch(`${API}/api/export`);
+    if (!r.ok) throw new Error('Error al exportar');
+    const disposition = r.headers.get('content-disposition') || '';
+    let filename = 'ccs_cashflow_export.json';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    if (match) filename = match[1];
+    const blob = await r.blob();
+    downloadBlob(blob, filename);
+    notify('success', 'Exportaci\u00f3n descargada exitosamente');
+  } catch(e) {
+    notify('error', 'Error al exportar: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-download"></i> Descargar archivo de exportaci\u00f3n'; }
+  }
+}
+
+function handleImportFileSelect(input) {
+  if (input.files.length > 0) {
+    _processImportFile(input.files[0]);
+  }
+}
+
+function _processImportFile(file) {
+  const statusEl = document.getElementById('importStatus');
+  const btnImport = document.getElementById('btnImportAll');
+  if (!file.name.endsWith('.json')) {
+    statusEl.style.display = 'block';
+    statusEl.style.background = '#fef2f2';
+    statusEl.style.color = '#dc2626';
+    statusEl.innerHTML = '<i class="fas fa-times-circle"></i> El archivo debe ser un .json generado por la exportaci\u00f3n.';
+    btnImport.style.display = 'none';
+    return;
+  }
+  statusEl.style.display = 'block';
+  statusEl.style.background = 'rgba(13,61,166,0.04)';
+  statusEl.style.color = 'var(--text-primary)';
+  statusEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verificando archivo...';
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const content = JSON.parse(e.target.result);
+      if (!content.integrity_hash || !content.data) {
+        statusEl.style.background = '#fef2f2';
+        statusEl.style.color = '#dc2626';
+        statusEl.innerHTML = '<i class="fas fa-times-circle"></i> Archivo inv\u00e1lido. No tiene la estructura de exportaci\u00f3n esperada.';
+        btnImport.style.display = 'none';
+        return;
+      }
+      if (content.data.export_version !== '1.0') {
+        statusEl.style.background = '#fef2f2';
+        statusEl.style.color = '#dc2626';
+        statusEl.innerHTML = '<i class="fas fa-times-circle"></i> Versi\u00f3n no soportada: ' + escapeHtml(content.data.export_version || 'desconocida');
+        btnImport.style.display = 'none';
+        return;
+      }
+      const data = content.data;
+      const companyCount = (data.companies || []).length;
+      const sessionCount = Object.keys(data.sessions || {}).length;
+      const promptCount = Object.keys(data.prompts || {}).length;
+      statusEl.style.background = '#f0fdf4';
+      statusEl.style.color = '#166534';
+      statusEl.innerHTML = '<i class="fas fa-check-circle"></i> <strong>Archivo v\u00e1lido</strong> &mdash; Exportado el ' + escapeHtml(data.exported_at || 'fecha desconocida') + '<br>' +
+        '<div style="margin-top:6px;display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;font-size:11px">' +
+        '<div><strong>' + companyCount + '</strong> empresas</div>' +
+        '<div><strong>' + sessionCount + '</strong> sesiones</div>' +
+        '<div><strong>' + promptCount + '</strong> prompts</div>' +
+        '</div>' +
+        '<div style="margin-top:6px;font-size:10px;color:#166534"><i class="fas fa-lock"></i> Hash SHA-256: ' + escapeHtml(content.integrity_hash.substring(0, 16)) + '...</div>';
+      _importFileData = file;
+      btnImport.style.display = 'inline-flex';
+    } catch(parseErr) {
+      statusEl.style.background = '#fef2f2';
+      statusEl.style.color = '#dc2626';
+      statusEl.innerHTML = '<i class="fas fa-times-circle"></i> Error al leer: ' + escapeHtml(parseErr.message);
+      btnImport.style.display = 'none';
+    }
+  };
+  reader.readAsText(file);
+}
+
+async function executeImportData() {
+  if (!_importFileData) { notify('error', 'No hay archivo seleccionado'); return; }
+  if (!confirm('\u00bfEst\u00e1s seguro de importar estos datos?\n\nSe verificar\u00e1 la integridad. Los datos existentes NO se sobreescribir\u00e1n.')) return;
+  const btn = document.getElementById('btnImportAll');
+  const statusEl = document.getElementById('importStatus');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Importando...';
+  const formData = new FormData();
+  formData.append('file', _importFileData);
+  try {
+    const r = await fetch(`${API}/api/import`, { method: 'POST', body: formData });
+    if (!r.ok) { const err = await r.json(); throw new Error(err.detail || 'Error desconocido'); }
+    const result = await r.json();
+    const stats = result.stats || {};
+    statusEl.style.background = '#f0fdf4';
+    statusEl.style.color = '#166534';
+    statusEl.innerHTML = '<i class="fas fa-check-circle"></i> <strong>Importaci\u00f3n exitosa</strong><br>' +
+      '<div style="margin-top:6px;font-size:11px">' +
+      (stats.companies > 0 ? stats.companies + ' empresas importadas<br>' : '') +
+      (stats.sessions > 0 ? stats.sessions + ' sesiones importadas<br>' : '') +
+      (stats.prompts > 0 ? stats.prompts + ' prompts importados<br>' : '') +
+      (stats.skills > 0 ? stats.skills + ' skills importados<br>' : '') +
+      (stats.skipped_existing > 0 ? stats.skipped_existing + ' elementos omitidos (ya exist\u00edan)<br>' : '') +
+      '</div>';
+    notify('success', 'Importaci\u00f3n completada');
+    _importFileData = null;
+    btn.style.display = 'none';
+    await loadCompanies();
+  } catch(e) {
+    statusEl.style.background = '#fef2f2';
+    statusEl.style.color = '#dc2626';
+    statusEl.innerHTML = '<i class="fas fa-times-circle"></i> <strong>Error</strong>: ' + escapeHtml(e.message);
+    notify('error', 'Error al importar: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-upload"></i> Importar datos verificados';
   }
 }
 
