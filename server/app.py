@@ -399,7 +399,40 @@ def call_ollama(model: str, system_prompt: str, user_message: str,
             _start_pull_background(model)
             raise HTTPException(503, f"Modelo {model} no disponible. Descarga iniciada.")
         resp.raise_for_status()
-        content = resp.json()["message"]["content"]
+        resp_data = resp.json()
+        content = resp_data["message"]["content"]
+        # Track token usage y audit para call_ollama
+        try:
+            latency_ms = int((resp.elapsed.total_seconds()) * 1000) if hasattr(resp, 'elapsed') else 0
+            total_tokens = resp_data.get("eval_count", 0) + resp_data.get("prompt_eval_count", 0)
+            agent_hint = "unknown"
+            task_hint = "generation"
+            sp_lower = system_prompt.lower()
+            if "extrac" in sp_lower or "json" in sp_lower:
+                agent_hint = "data_extractor"
+                task_hint = "data_extraction"
+            elif "cashflow" in sp_lower or "flujo" in sp_lower:
+                agent_hint = "cashflow_analyst"
+                task_hint = "cashflow_generation"
+            elif "simulad" in sp_lower or "escenario" in sp_lower or "monte carlo" in sp_lower:
+                agent_hint = "scenario_simulator"
+                task_hint = "simulation"
+            elif "entrevista" in sp_lower or "financiero" in sp_lower:
+                agent_hint = "financial_interviewer"
+                task_hint = "interview"
+            if total_tokens > 0:
+                track_token_usage(agent_hint, total_tokens)
+            _log_audit_entry(
+                agent_id=agent_hint,
+                task=task_hint,
+                model=model,
+                inputs_summary=user_message[:500],
+                output_summary=content[:500],
+                latency_ms=latency_ms,
+                success=True
+            )
+        except Exception:
+            pass
         return _fix_encoding(content)
     except http_requests.exceptions.ConnectionError:
         raise HTTPException(503, "No se puede conectar con Ollama. Verifica que esté ejecutándose.")
@@ -1355,17 +1388,18 @@ async def chat_interview(data: ChatMessage):
 
     company = load_json(company_dir / "company.json")
 
-    # --- Inicializar InterviewManager con datos de la empresa ---
-    im = InterviewManager(company_data=company)
-
-    # Cargar sesiones previas para reconstruir progreso
+    # --- Cargar estado persistido de la entrevista ---
     sessions_dir = DATA_DIR / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    for f in sorted(sessions_dir.glob(f"{company_id}_*.json")):
-        prev_session = load_json(f)
-        for msg in prev_session.get("messages", []):
-            if msg.get("role") == "user":
-                im.extract_data_from_response(msg["content"], "")
+    interview_state_path = company_dir / "interview_state.json"
+    persisted_state = load_json(interview_state_path, {"collected_data": {}, "topics_covered": []})
+
+    # Inicializar InterviewManager con datos persistidos (NUNCA re-parsear sesiones)
+    im = InterviewManager(
+        company_data=company,
+        persisted_data=persisted_state.get("collected_data", {}),
+        persisted_topics=persisted_state.get("topics_covered", [])
+    )
 
     # Extraer datos del mensaje actual ANTES de generar el prompt
     extracted = im.extract_data_from_response(data.message, "")
@@ -1382,9 +1416,9 @@ async def chat_interview(data: ChatMessage):
     if not agent:
         raise HTTPException(500, "Agente entrevistador no configurado")
 
-    # Construir mensajes para el LLM (limitar contexto a últimos 16 mensajes)
+    # Construir mensajes para el LLM (limitar contexto a últimos 12 mensajes para eficiencia)
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in session.get("messages", [])[-16:]:
+    for msg in session.get("messages", [])[-12:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": data.message})
 
@@ -1405,6 +1439,15 @@ async def chat_interview(data: ChatMessage):
 
     # Extraer datos también de la respuesta del LLM (puede contener datos implícitos)
     im.extract_data_from_response(response, "")
+
+    # --- PERSISTIR estado de la entrevista (NUNCA retrocede) ---
+    # Merge: solo agregar nuevos datos, nunca borrar existentes
+    new_state = {
+        "collected_data": im.collected_data,
+        "topics_covered": list(set(im.topics_covered)),  # Deduplicar
+        "last_updated": datetime.now().isoformat(),
+    }
+    save_json(interview_state_path, new_state)
 
     # Calcular progreso y sugerencias dinámicas basadas en la respuesta
     progress = im.get_interview_progress()
@@ -2217,7 +2260,7 @@ async def list_agents():
         for skill_name in agent.get("skills", []):
             skill_paths = [
                 DATA_DIR / "prompts" / "skills" / f"{skill_name}.md",
-                DEFAULTS_DIR / "prompts" / f"{skill_name}.md",
+                DEFAULTS_DIR / "prompts" / "skills" / f"{skill_name}.md",
             ]
             for sp in skill_paths:
                 if sp.exists():

@@ -185,12 +185,13 @@ class InterviewManager:
     - Calcula progreso real basado en datos recopilados
     """
 
-    def __init__(self, company_data: dict = None, session_messages: List[dict] = None):
+    def __init__(self, company_data: dict = None, session_messages: List[dict] = None,
+                 persisted_data: dict = None, persisted_topics: list = None):
         self.company_data = company_data or {}
         self.session_messages = session_messages or []
-        self.collected_data: Dict[str, Any] = {}
+        self.collected_data: Dict[str, Any] = persisted_data.copy() if persisted_data else {}
         self.assumptions: List[dict] = []
-        self.topics_covered: List[str] = []
+        self.topics_covered: List[str] = list(persisted_topics) if persisted_topics else []
 
         # Intentar extraer datos ya conocidos de la empresa
         if company_data:

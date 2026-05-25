@@ -836,11 +836,11 @@ async function applySimulation() {
       return;
     }
 
-    // V2 retorna: { scenario_id, result: { months, caja_final, ... } }
-    const months = data.result?.months || data.months || [];
+    // V2 retorna: { scenario_id, result: { months/meses, caja_final, ... } }
+    const months = data.result?.months || data.result?.meses || data.months || [];
     if (months.length > 0) {
       renderSimulationChart(months);
-      const cajaFinal = data.result?.caja_final || months[months.length - 1]?.cumulative_balance;
+      const cajaFinal = data.result?.caja_final || months[months.length - 1]?.balance || months[months.length - 1]?.cumulative_balance;
       document.getElementById('simResult').innerHTML = `
         <div class="stat-card green">
           <div class="stat-label">Caja Final Simulada</div>
@@ -907,22 +907,39 @@ function renderSimulationChart(months) {
   const ctx = document.getElementById('chartSimulation');
   if (state.charts.simulation) state.charts.simulation.destroy();
 
+  // Generar labels de meses si no vienen
+  const labels = months.map((m, i) => m.label || m.month || `Mes ${i + 1}`);
+  // Soportar tanto 'balance' (V2 scenario) como 'cumulative_balance' (V1)
+  const balances = months.map(m => m.balance ?? m.cumulative_balance ?? 0);
+  const netFlows = months.map(m => m.net_flow ?? m.netFlow ?? 0);
+
   state.charts.simulation = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: months.map(m => m.label || m.month),
-      datasets: [{
-        label: 'Saldo Simulado',
-        data: months.map(m => m.cumulative_balance),
-        borderColor: '#3A6DDE',
-        backgroundColor: 'rgba(58,109,222,0.08)',
-        fill: true,
-        tension: 0.3,
-      }]
+      labels: labels,
+      datasets: [
+        {
+          label: 'Saldo Acumulado',
+          data: balances,
+          borderColor: '#3A6DDE',
+          backgroundColor: 'rgba(58,109,222,0.08)',
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: 'Flujo Neto Mensual',
+          data: netFlows,
+          borderColor: '#3DAE2B',
+          backgroundColor: 'rgba(61,174,43,0.08)',
+          fill: false,
+          tension: 0.3,
+          borderDash: [5, 5],
+        }
+      ]
     },
     options: {
       responsive: true,
-      plugins: { legend: { display: false } },
+      plugins: { legend: { display: true, position: 'top' } },
       scales: { y: { ticks: { callback: v => formatCurrencyShort(v) } } }
     }
   });
