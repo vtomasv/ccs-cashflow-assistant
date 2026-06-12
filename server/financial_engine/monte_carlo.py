@@ -32,8 +32,8 @@ class MonteCarloSimulator:
         self.model = model
         self.iterations = min(iterations, 5000)  # Limitar para hardware limitado
         self.seed = seed
-        if seed is not None:
-            random.seed(seed)
+        # Usar instancia propia de Random para thread-safety (no contamina estado global)
+        self._rng = random.Random(seed)
 
         # Configuración de variabilidad por variable (desviación estándar como % del valor)
         self.variability = {
@@ -255,7 +255,7 @@ class MonteCarloSimulator:
         Genera un número aleatorio con distribución normal truncada.
         Trunca a ±3 desviaciones estándar para evitar valores extremos irreales.
         """
-        value = random.gauss(mean, std)
+        value = self._rng.gauss(mean, std)
         # Truncar a ±3 std
         lower = mean - 3 * std
         upper = mean + 3 * std

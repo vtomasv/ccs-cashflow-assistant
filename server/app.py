@@ -45,7 +45,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 from interview_manager import InterviewManager
 
 # ---------------------------------------------------------------------------
@@ -158,17 +158,19 @@ def _sanitize_filename(name: str) -> str:
     return name
 
 # ---------------------------------------------------------------------------
-# Rate Limiting simple (en memoria)
+# Rate Limiting simple (en memoria) — protegido con lock
 # ---------------------------------------------------------------------------
 _rate_limit_store: Dict[str, list] = defaultdict(list)
+_rate_limit_lock = threading.Lock()
 
 def _check_rate_limit(key: str, max_requests: int = RATE_LIMIT_MAX_REQUESTS, window: int = RATE_LIMIT_WINDOW):
     """Verifica rate limit por clave. Lanza HTTPException 429 si se excede."""
     now = time.time()
-    _rate_limit_store[key] = [t for t in _rate_limit_store[key] if now - t < window]
-    if len(_rate_limit_store[key]) >= max_requests:
-        raise HTTPException(429, f"Demasiadas solicitudes. Espera {window} segundos.")
-    _rate_limit_store[key].append(now)
+    with _rate_limit_lock:
+        _rate_limit_store[key] = [t for t in _rate_limit_store[key] if now - t < window]
+        if len(_rate_limit_store[key]) >= max_requests:
+            raise HTTPException(429, f"Demasiadas solicitudes. Espera {window} segundos.")
+        _rate_limit_store[key].append(now)
 
 # ---------------------------------------------------------------------------
 # FastAPI App
@@ -201,13 +203,18 @@ async def log_errors_middleware(request: Request, call_next):
             logger.warning(f"[HTTP {response.status_code}] {request.method} {request.url.path}")
         return response
     except Exception as e:
-        logger.error(f"[UNHANDLED ERROR] {request.method} {request.url.path}: {type(e).__name__}: {e}")
-        return JSONResponse(status_code=500, content={"detail": f"Error interno: {type(e).__name__}"})
+        import uuid as _uuid
+        correlation_id = str(_uuid.uuid4())[:8]
+        logger.error(f"[UNHANDLED ERROR][{correlation_id}] {request.method} {request.url.path}: {type(e).__name__}: {e}")
+        return JSONResponse(status_code=500, content={"detail": f"Error interno del servidor. Referencia: {correlation_id}"})
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"[EXCEPTION] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
-    return JSONResponse(status_code=500, content={"detail": f"Error del servidor: {type(exc).__name__}: {str(exc)[:200]}"})
+    # Generar ID de correlación para rastreo en logs sin exponer detalles al cliente
+    import uuid as _uuid
+    correlation_id = str(_uuid.uuid4())[:8]
+    logger.error(f"[EXCEPTION][{correlation_id}] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": f"Error interno del servidor. Referencia: {correlation_id}"})
 
 # ---------------------------------------------------------------------------
 # Utilidades de persistencia
@@ -240,7 +247,8 @@ def load_json(path: Path, default=None):
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[load_json] Archivo corrupto o ilegible: {path}. Error: {e}. Retornando default.")
             return default if default is not None else {}
     return default if default is not None else {}
 
@@ -366,6 +374,7 @@ def ensure_ollama_running() -> bool:
         return False
 
 _pull_status: dict = {}
+_pull_status_lock = threading.Lock()
 
 def _is_model_available(model: str) -> bool:
     try:
@@ -376,13 +385,15 @@ def _is_model_available(model: str) -> bool:
         return False
 
 def _start_pull_background(model: str):
-    if model in _pull_status and _pull_status[model].get("status") in ("pulling", "queued"):
-        return
-    _pull_status[model] = {"status": "queued", "progress": 0, "error": None}
+    with _pull_status_lock:
+        if model in _pull_status and _pull_status[model].get("status") in ("pulling", "queued"):
+            return
+        _pull_status[model] = {"status": "queued", "progress": 0, "error": None}
     threading.Thread(target=_do_pull, args=(model,), daemon=True).start()
 
 def _do_pull(model: str):
-    _pull_status[model]["status"] = "pulling"
+    with _pull_status_lock:
+        _pull_status[model]["status"] = "pulling"
     try:
         with http_requests.post(f"{OLLAMA_URL}/api/pull",
                                 json={"name": model, "stream": True},
@@ -391,10 +402,13 @@ def _do_pull(model: str):
                 if line:
                     data = json.loads(line)
                     if "completed" in data and "total" in data and data["total"] > 0:
-                        _pull_status[model]["progress"] = int(data["completed"] / data["total"] * 100)
-        _pull_status[model] = {"status": "done", "progress": 100, "error": None}
+                        with _pull_status_lock:
+                            _pull_status[model]["progress"] = int(data["completed"] / data["total"] * 100)
+        with _pull_status_lock:
+            _pull_status[model] = {"status": "done", "progress": 100, "error": None}
     except Exception as e:
-        _pull_status[model] = {"status": "error", "progress": 0, "error": str(e)}
+        with _pull_status_lock:
+            _pull_status[model] = {"status": "error", "progress": 0, "error": str(e)}
 
 def call_ollama(model: str, system_prompt: str, user_message: str,
                 temperature: float = 0.7, timeout: int = None) -> str:
@@ -546,11 +560,12 @@ def get_prompt(prompt_name: str) -> str:
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", prompt_name)
     if not safe_name:
         return ""
+    # Verificar que el path resuelto está dentro de los directorios permitidos
     path = DATA_DIR / "prompts" / "system" / f"{safe_name}.md"
-    if path.exists():
+    if path.resolve().is_relative_to(DATA_DIR.resolve()) and path.exists():
         return path.read_text(encoding="utf-8")
     path = DEFAULTS_DIR / "prompts" / f"{safe_name}.md"
-    if path.exists():
+    if path.resolve().is_relative_to(DEFAULTS_DIR.resolve()) and path.exists():
         return path.read_text(encoding="utf-8")
     return ""
 
@@ -568,7 +583,8 @@ class CompanyCreate(BaseModel):
     employees: int = 0
     age: str = ""
 
-    @validator("name")
+    @field_validator("name")
+    @classmethod
     def validate_name(cls, v):
         if not v or not v.strip():
             raise ValueError("El nombre de la empresa es requerido.")
@@ -581,13 +597,15 @@ class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = ""
 
-    @validator("session_id", pre=True, always=True)
+    @field_validator("session_id", mode="before")
+    @classmethod
     def coerce_session_id(cls, v):
         if v is None:
             return ""
         return str(v)
 
-    @validator("message")
+    @field_validator("message")
+    @classmethod
     def validate_message(cls, v):
         if not v or not v.strip():
             raise ValueError("El mensaje no puede estar vacío.")
@@ -600,7 +618,8 @@ class ScenarioRequest(BaseModel):
     use_ai: Optional[bool] = False
     params: Optional[Dict[str, Any]] = None
 
-    @validator("instruction")
+    @field_validator("instruction")
+    @classmethod
     def validate_instruction(cls, v):
         if not v or not v.strip():
             raise ValueError("La instrucción no puede estar vacía.")
@@ -613,19 +632,22 @@ class AgentConfigUpdate(BaseModel):
     temperature: Optional[float] = None
     system_prompt: Optional[str] = None
 
-    @validator("temperature")
+    @field_validator("temperature")
+    @classmethod
     def validate_temperature(cls, v):
         if v is not None and (v < 0.0 or v > 2.0):
             raise ValueError("La temperatura debe estar entre 0.0 y 2.0.")
         return v
 
-    @validator("system_prompt")
+    @field_validator("system_prompt")
+    @classmethod
     def validate_system_prompt(cls, v):
         if v is not None and len(v) > 50000:
             raise ValueError("El prompt del sistema no puede exceder 50000 caracteres.")
         return v
 
-class MonthData(BaseModel):
+class MonthPayload(BaseModel):
+    """Payload de entrada para edición de meses (renombrado para evitar colisión con core.MonthData)."""
     month: Optional[str] = None
     label: Optional[str] = None
     income: Optional[dict] = None
@@ -755,12 +777,12 @@ def _rescue_cashflow_structure(data: dict) -> dict:
             inner = data[key]
             if isinstance(inner.get("months"), list) and len(inner["months"]) > 0:
                 # Mover campos del wrapper al nivel superior
-                for k, v in inner.items():
+                for k, v in list(inner.items()):
                     data[k] = v
                 return data
     
     # Buscar cualquier campo que sea una lista de dicts con estructura de mes
-    for key, val in data.items():
+    for key, val in list(data.items()):
         if key == "months":
             continue
         if isinstance(val, list) and len(val) > 0:
@@ -1715,7 +1737,7 @@ async def get_cashflow(company_id: str):
 # Endpoints: Edición manual de meses del flujo de caja
 # ---------------------------------------------------------------------------
 @app.put("/api/companies/{company_id}/cashflow/months/{month_index}")
-async def update_month(company_id: str, month_index: int, month_data: MonthData):
+async def update_month(company_id: str, month_index: int, month_data: MonthPayload):
     company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
@@ -1746,7 +1768,7 @@ async def update_month(company_id: str, month_index: int, month_data: MonthData)
     return cashflow
 
 @app.post("/api/companies/{company_id}/cashflow/months")
-async def add_month(company_id: str, month_data: MonthData):
+async def add_month(company_id: str, month_data: MonthPayload):
     company_id = _sanitize_id(company_id)
     company_dir = DATA_DIR / "companies" / company_id
     cashflow_path = company_dir / "cashflow.json"
@@ -2468,9 +2490,10 @@ async def available_models():
         return {"models": []}
 
 # ---------------------------------------------------------------------------
-# Endpoints: Token Usage
+# Endpoints: Token Usage — protegido con lock
 # ---------------------------------------------------------------------------
 _token_usage_file = DATA_DIR / "token_usage.json"
+_token_usage_lock = threading.Lock()
 
 def _load_token_usage():
     if _token_usage_file.exists():
@@ -2481,20 +2504,21 @@ def _save_token_usage(data):
     save_json(_token_usage_file, data)
 
 def track_token_usage(agent_id: str, tokens: int):
-    """Llamar después de cada llamada a Ollama para trackear tokens."""
-    data = _load_token_usage()
-    data["stats"]["total_tokens"] = data["stats"].get("total_tokens", 0) + tokens
-    data["stats"]["total_requests"] = data["stats"].get("total_requests", 0) + 1
-    if agent_id not in data["stats"].get("by_agent", {}):
-        data["stats"]["by_agent"][agent_id] = {"tokens": 0, "requests": 0}
-    data["stats"]["by_agent"][agent_id]["tokens"] += tokens
-    data["stats"]["by_agent"][agent_id]["requests"] += 1
-    data["recent_sessions"].insert(0, {
-        "agent": agent_id,
-        "tokens": tokens,
-        "timestamp": datetime.now().isoformat()
-    })
-    data["recent_sessions"] = data["recent_sessions"][:100]  # Keep last 100
+    """Llamar después de cada llamada a Ollama para trackear tokens (thread-safe)."""
+    with _token_usage_lock:
+        data = _load_token_usage()
+        data["stats"]["total_tokens"] = data["stats"].get("total_tokens", 0) + tokens
+        data["stats"]["total_requests"] = data["stats"].get("total_requests", 0) + 1
+        if agent_id not in data["stats"].get("by_agent", {}):
+            data["stats"]["by_agent"][agent_id] = {"tokens": 0, "requests": 0}
+        data["stats"]["by_agent"][agent_id]["tokens"] += tokens
+        data["stats"]["by_agent"][agent_id]["requests"] += 1
+        data["recent_sessions"].insert(0, {
+            "agent": agent_id,
+            "tokens": tokens,
+            "timestamp": datetime.now().isoformat()
+        })
+        data["recent_sessions"] = data["recent_sessions"][:100]  # Keep last 100
     _save_token_usage(data)
 
 @app.get("/api/token-usage")
@@ -2704,11 +2728,15 @@ async def export_all_data():
         raise HTTPException(status_code=500, detail=f"Error al exportar datos: {str(e)}")
 
 
+MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
 @app.post("/api/import")
 async def import_all_data(file: UploadFile = File(...)):
-    """Importa datos desde un archivo de exportaci\u00f3n, verificando integridad por hash."""
+    """Importa datos desde un archivo de exportación, verificando integridad por hash."""
     try:
         content = await file.read()
+        if len(content) > MAX_IMPORT_FILE_SIZE:
+            raise HTTPException(status_code=413, detail=f"El archivo excede el tamaño máximo permitido ({MAX_IMPORT_FILE_SIZE // (1024*1024)} MB).")
         try:
             package = json.loads(content.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:

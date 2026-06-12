@@ -21,12 +21,14 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 
-# Imports del motor financiero
+# Imports del motor financiero (usa imports relativos al directorio server/)
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
+_server_dir = os.path.dirname(os.path.abspath(__file__))
+if _server_dir not in sys.path:
+    sys.path.insert(0, _server_dir)
 
 from financial_engine.core import CashflowModel, BusinessProfile, MonthData as EngineMonthData
 from financial_engine.metrics import FinancialMetrics
@@ -56,8 +58,10 @@ def _sanitize_for_json(d):
 # ---------------------------------------------------------------------------
 router = APIRouter(prefix="/api/v2", tags=["advanced"])
 
-# Estado de generación avanzada (en memoria, compartido)
+# Estado de generación avanzada (en memoria, compartido) — protegido con lock
+import threading as _threading
 _advanced_generation_status: Dict[str, dict] = {}
+_advanced_gen_lock = _threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Utilidades compartidas (importadas desde app.py al registrar)
@@ -100,13 +104,15 @@ class GenerateCashflowV2Request(BaseModel):
     run_monte_carlo: bool = True
     monte_carlo_iterations: int = 500
 
-    @validator("months")
+    @field_validator("months")
+    @classmethod
     def validate_months(cls, v):
         if v < 1 or v > 36:
             raise ValueError("El número de meses debe estar entre 1 y 36.")
         return v
 
-    @validator("monte_carlo_iterations")
+    @field_validator("monte_carlo_iterations")
+    @classmethod
     def validate_iterations(cls, v):
         if v < 100 or v > 5000:
             raise ValueError("Las iteraciones Monte Carlo deben estar entre 100 y 5000.")
@@ -118,7 +124,8 @@ class MonteCarloRequest(BaseModel):
     iterations: int = 1000
     variability: Optional[Dict[str, float]] = None
 
-    @validator("iterations")
+    @field_validator("iterations")
+    @classmethod
     def validate_iterations(cls, v):
         if v < 100 or v > 5000:
             raise ValueError("Las iteraciones deben estar entre 100 y 5000.")
@@ -146,7 +153,8 @@ class SensitivityRequest(BaseModel):
     range_pct: float = 30.0
     steps: int = 7
 
-    @validator("variable")
+    @field_validator("variable")
+    @classmethod
     def validate_variable(cls, v):
         allowed = ["ventas", "costos_variables", "costos_fijos"]
         if v not in allowed:
@@ -899,17 +907,19 @@ async def restore_cashflow_version(company_id: str, version_id: str):
 # Helpers internos
 # ---------------------------------------------------------------------------
 def _update_status(task_id: str, progress: int, step: str, phase: str):
-    """Actualiza el estado de una tarea de generación."""
-    if task_id in _advanced_generation_status:
-        _advanced_generation_status[task_id]["progress"] = progress
-        _advanced_generation_status[task_id]["step"] = step
-        _advanced_generation_status[task_id]["phase"] = phase
+    """Actualiza el estado de una tarea de generación (thread-safe)."""
+    with _advanced_gen_lock:
+        if task_id in _advanced_generation_status:
+            _advanced_generation_status[task_id]["progress"] = progress
+            _advanced_generation_status[task_id]["step"] = step
+            _advanced_generation_status[task_id]["phase"] = phase
 
 
 def _add_notification(task_id: str, message: str):
-    """Agrega una notificación al estado de la tarea."""
-    if task_id in _advanced_generation_status:
-        _advanced_generation_status[task_id]["notifications"].append({
-            "message": message,
-            "timestamp": datetime.now().isoformat(),
-        })
+    """Agrega una notificación al estado de la tarea (thread-safe)."""
+    with _advanced_gen_lock:
+        if task_id in _advanced_generation_status:
+            _advanced_generation_status[task_id]["notifications"].append({
+                "message": message,
+                "timestamp": datetime.now().isoformat(),
+            })

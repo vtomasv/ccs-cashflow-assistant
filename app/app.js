@@ -75,7 +75,7 @@ function showReadinessBanner(ready, message) {
   } else {
     el.innerHTML = `<div class="readiness-banner not-ready">
       <div style="font-size:20px;">&#9888;&#65039;</div>
-      <div><div style="font-weight:700;">Sistema preparándose</div><div style="font-size:12px;opacity:0.8;">${message || 'Verificando modelos de IA...'}</div></div>
+      <div><div style="font-weight:700;">Sistema prepar\u00e1ndose</div><div style="font-size:12px;opacity:0.8;">${escapeHtml(message || 'Verificando modelos de IA...')}</div></div>
     </div>`;
   }
 }
@@ -151,14 +151,14 @@ function renderCompaniesGrid() {
   }
 
   grid.innerHTML = state.companies.map(c => {
-    const initial = (c.name || '?')[0].toUpperCase();
+    const initial = escapeHtml((c.name || '?')[0].toUpperCase());
     const statusClass = c.status === 'complete' ? 'status-complete' : c.status === 'interviewing' ? 'status-interviewing' : 'status-pending';
     const statusText = c.status === 'complete' ? 'Cashflow listo' : c.status === 'interviewing' ? 'En entrevista' : 'Pendiente';
     const selected = c.id === state.companyId ? 'selected' : '';
-    return `<div class="company-card ${selected}" onclick="selectCompany('${c.id}')">
+    return `<div class="company-card ${selected}" onclick="selectCompany('${escapeHtml(c.id)}')">
       <div class="company-avatar">${initial}</div>
-      <div class="company-name">${c.name}</div>
-      <div class="company-sector">${c.sector || 'Sin sector'}</div>
+      <div class="company-name">${escapeHtml(c.name)}</div>
+      <div class="company-sector">${escapeHtml(c.sector || 'Sin sector')}</div>
       <div class="company-status ${statusClass}">${statusText}</div>
     </div>`;
   }).join('');
@@ -174,13 +174,13 @@ function renderHomeCompanies() {
       <button class="btn btn-sm btn-secondary" onclick="navigateTo('companies')">Ver todas</button>
     </div>
     <div class="grid-3">${state.companies.slice(0, 3).map(c => {
-      const initial = (c.name || '?')[0].toUpperCase();
+      const initial = escapeHtml((c.name || '?')[0].toUpperCase());
       const statusClass = c.status === 'complete' ? 'status-complete' : c.status === 'interviewing' ? 'status-interviewing' : 'status-pending';
       const statusText = c.status === 'complete' ? 'Cashflow listo' : c.status === 'interviewing' ? 'En entrevista' : 'Pendiente';
-      return `<div class="company-card" onclick="selectCompany('${c.id}')">
+      return `<div class="company-card" onclick="selectCompany('${escapeHtml(c.id)}')">
         <div class="company-avatar">${initial}</div>
-        <div class="company-name">${c.name}</div>
-        <div class="company-sector">${c.sector || 'Sin sector'}</div>
+        <div class="company-name">${escapeHtml(c.name)}</div>
+        <div class="company-sector">${escapeHtml(c.sector || 'Sin sector')}</div>
         <div class="company-status ${statusClass}">${statusText}</div>
       </div>`;
     }).join('')}</div>
@@ -216,7 +216,7 @@ async function selectCompany(id) {
       await loadSession(id, lastSession.id);
     } else {
       const chatDiv = document.getElementById('chatMessages');
-      chatDiv.innerHTML = `<div class="chat-message system-msg">Bienvenido. Soy tu analista financiero. Vamos a construir el modelo de flujo de caja para <strong>${company.name}</strong>. Cuéntame sobre tu negocio.</div>`;
+      chatDiv.innerHTML = `<div class="chat-message system-msg">Bienvenido. Soy tu analista financiero. Vamos a construir el modelo de flujo de caja para <strong>${escapeHtml(company.name)}</strong>. Cuéntame sobre tu negocio.</div>`;
     }
 
     // Enable chat
@@ -308,14 +308,14 @@ function renderCompanySummary() {
 
   document.getElementById('companySummary').innerHTML = `
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
-      <div><span style="color:var(--text-muted);">Nombre:</span> <strong>${name}</strong></div>
-      <div><span style="color:var(--text-muted);">Sector:</span> <strong>${sector}</strong></div>
-      ${size ? `<div><span style="color:var(--text-muted);">Tamaño:</span> <strong>${sizeLabels[size] || size}</strong></div>` : ''}
-      ${country ? `<div><span style="color:var(--text-muted);">País:</span> <strong>${country}</strong></div>` : ''}
-      ${currency ? `<div><span style="color:var(--text-muted);">Moneda:</span> <strong>${currency}</strong></div>` : ''}
+      <div><span style="color:var(--text-muted);">Nombre:</span> <strong>${escapeHtml(name)}</strong></div>
+      <div><span style="color:var(--text-muted);">Sector:</span> <strong>${escapeHtml(sector)}</strong></div>
+      ${size ? `<div><span style="color:var(--text-muted);">Tamaño:</span> <strong>${escapeHtml(sizeLabels[size] || size)}</strong></div>` : ''}
+      ${country ? `<div><span style="color:var(--text-muted);">País:</span> <strong>${escapeHtml(country)}</strong></div>` : ''}
+      ${currency ? `<div><span style="color:var(--text-muted);">Moneda:</span> <strong>${escapeHtml(currency)}</strong></div>` : ''}
       ${cash ? `<div><span style="color:var(--text-muted);">Caja inicial:</span> <strong>${formatCurrency(cash)}</strong></div>` : ''}
-      ${employees ? `<div><span style="color:var(--text-muted);">Empleados:</span> <strong>${employees}</strong></div>` : ''}
-      ${age ? `<div><span style="color:var(--text-muted);">Antigüedad:</span> <strong>${ageLabels[age] || age}</strong></div>` : ''}
+      ${employees ? `<div><span style="color:var(--text-muted);">Empleados:</span> <strong>${escapeHtml(String(employees))}</strong></div>` : ''}
+      ${age ? `<div><span style="color:var(--text-muted);">Antigüedad:</span> <strong>${escapeHtml(ageLabels[age] || age)}</strong></div>` : ''}
     </div>`;
 }
 
@@ -392,10 +392,16 @@ function handleChatKey(event) {
   }
 }
 
+const MAX_MESSAGE_LENGTH = 10000;
+
 async function sendMessage() {
   const input = document.getElementById('chatInput');
   const msg = input.value.trim();
   if (!msg || !state.companyId) return;
+  if (msg.length > MAX_MESSAGE_LENGTH) {
+    addChatBubble('assistant', `El mensaje es demasiado largo (máximo ${MAX_MESSAGE_LENGTH} caracteres).`);
+    return;
+  }
 
   input.value = '';
   input.style.height = 'auto';
@@ -479,12 +485,16 @@ function addChatBubble(role, content) {
   const chatDiv = document.getElementById('chatMessages');
   const div = document.createElement('div');
   div.className = `chat-message ${role}`;
-  // Simple markdown rendering
-  const sanitized = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(content) : content;
-  div.innerHTML = sanitized
+  // Sanitizar primero con DOMPurify, luego aplicar markdown básico
+  var safeContent = typeof DOMPurify !== 'undefined'
+    ? DOMPurify.sanitize(content, { ALLOWED_TAGS: ['strong', 'em', 'br', 'p', 'ul', 'ol', 'li', 'code'], ALLOWED_ATTR: [] })
+    : escapeHtml(content);
+  // Markdown básico sobre contenido ya saneado
+  safeContent = safeContent
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
     .replace(/\n/g, '<br>');
+  div.innerHTML = safeContent;
   chatDiv.appendChild(div);
   chatDiv.scrollTop = chatDiv.scrollHeight;
 }
@@ -593,7 +603,7 @@ function pollGenerationProgress(taskId) {
         const existing = container.querySelectorAll('.notification-item').length;
         data.notifications.slice(existing).forEach(n => {
           const msg = (typeof n === 'string') ? n : (n.message || JSON.stringify(n));
-          container.innerHTML += `<div class="notification-item"><i class="fas fa-info-circle" style="color:var(--ccs-azul);margin-right:6px;"></i>${msg}</div>`;
+          container.innerHTML += `<div class="notification-item"><i class="fas fa-info-circle" style="color:var(--ccs-azul);margin-right:6px;"></i>${escapeHtml(msg)}</div>`;
         });
         container.scrollTop = container.scrollHeight;
       }
@@ -1254,7 +1264,7 @@ async function loadSettings() {
     loadExportInfo();
   } catch(e) {
     console.error('[CCS] Error loading settings:', e);
-    document.getElementById('settingsContent').innerHTML = '<p style="color:var(--text-muted);">Error cargando configuraci\u00f3n: ' + e.message + '</p>';
+    document.getElementById('settingsContent').innerHTML = '<p style="color:var(--text-muted);">Error cargando configuraci\u00f3n: ' + escapeHtml(e.message) + '</p>';
   }
 }
 
@@ -1520,7 +1530,7 @@ async function loadAgents() {
     grid.innerHTML = html;
   } catch(e) {
     console.error('[CCS] Error loading agents:', e);
-    grid.innerHTML = '<div class="card" style="padding:20px;"><p style="color:var(--text-muted);">Error cargando agentes: ' + e.message + '</p></div>';
+    grid.innerHTML = '<div class="card" style="padding:20px;"><p style="color:var(--text-muted);">Error cargando agentes: ' + escapeHtml(e.message) + '</p></div>';
   }
 }
 
